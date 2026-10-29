@@ -1,0 +1,93 @@
+name: Bug report
+description: A builder, a decoder, a signature, or a submission that misbehaves
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Most reports here are one of two things: the contract refused the call
+        (`SimulationRejectedError`, with an error code that names why), or the node
+        said something this SDK decoded wrongly. Saying which one saves a round
+        trip. If this is a security problem, do not file it here: use **Security →
+        Report a vulnerability**, see `SECURITY.md`.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The call you made, what came back or threw, and what you expected.
+      placeholder: |
+        `client.hasAccess({ resource, action }, holder)` threw `KeygateError:
+        core.check returned no value`, but the grant exists on-chain.
+    validations:
+      required: true
+  - type: textarea
+    id: code
+    attributes:
+      label: The shortest code that reproduces it
+      description: |
+        Constructor options (with real addresses or obvious placeholders), the
+        builder you called, and the result. A `FakeHost` reproduction is ideal —
+        that is how the suite works, and it means the bug is in this SDK rather
+        than in the network.
+      render: typescript
+      placeholder: |
+        const client = new KeygateClient({ host: connect(url), contracts, networkPassphrase, signer });
+        await client.send(coreCalls.issue({ resource: 'vault:main', action: 'withdraw' }, holder, 3_600));
+    validations:
+      required: true
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Which layer failed
+      options:
+        - calls.ts — the arguments or function name the builders produce
+        - abi.ts — encoding an argument, or decoding a return value
+        - client.ts — simulate, authorize, submit, commit
+        - host.ts — the RPC mappers or connect()
+        - signer.ts — authorisation or transaction signing
+        - errors.ts — a code that names the wrong variant
+        - decision.ts — canonical rendering or verification
+        - types / configuration
+    validations:
+      required: true
+  - type: dropdown
+    id: error
+    attributes:
+      label: What was thrown
+      options:
+        - SimulationRejectedError
+        - SubmitFailedError
+        - TransactionFailedError
+        - CommitTimeoutError
+        - ConfigurationError
+        - KeygateError (the base, or something unexpected)
+        - Nothing threw — the value is wrong
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: From `package.json`, or the commit you built from.
+      placeholder: '0.1.0'
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: Runtime
+      description: Node version, or the browser and bundler if it is not Node.
+      placeholder: 'node 20.19 / chrome 130 + vite 5'
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: I searched open and closed issues for this
+          required: true
+        - label: I checked whether the contract itself refused (the error's `code` and role name the reason)
+          required: true
+        - label: I am not reporting a vulnerability here (those go to a private advisory)
+          required: true

@@ -1,0 +1,74 @@
+name: Node
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: lint · typecheck · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable pnpm from packageManager
+        uses: pnpm/action-setup@v4
+
+      - name: Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Format
+        run: pnpm format:check
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test and coverage
+        # Thresholds in vitest.config.ts only bite when coverage is collected, so
+        # CI runs the coverage command rather than the bare `test` script.
+        run: pnpm exec vitest run --coverage
+
+      - name: Build
+        # The published entry point is `dist/`, so a build failure here is a
+        # packaging failure, not a typecheck one — `d.ts` emit is what an
+        # integrator compiles against.
+        run: pnpm build
+
+      - name: Check the package surface
+        run: |
+          test -f dist/index.js
+          test -f dist/index.d.ts
+          node --input-type=module -e "
+            const sdk = await import('./dist/index.js');
+            const missing = ['KeygateClient','connect','coreCalls','policyCalls','breakerCalls','multisigCalls','rawCall','keypairSigner','verifyDecision','canonicalDecision','decisionIsUsable','KeygateError']
+              .filter((name) => !(name in sdk));
+            if (missing.length > 0) {
+              console.error('not exported from the built package:', missing.join(', '));
+              process.exit(1);
+            }
+          "
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 14

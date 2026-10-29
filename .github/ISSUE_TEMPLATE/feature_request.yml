@@ -1,0 +1,65 @@
+name: Feature request
+description: A builder, a decoder, a signer shape, or a verification helper
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This SDK is deliberately narrow: the four keygate contracts, plus decision
+        verification. Funding and friendbot, time bounds, fee bumping, batching, a
+        general-purpose contract caller, and a wallet adapter per extension are
+        documented non-goals — see "What this project will not add" in
+        `CONTRIBUTING.md`. `rawCall` already covers a keygate function the
+        builders have not caught up with.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do
+      description: The integration goal, not the API you have in mind.
+      placeholder: |
+        I need to know which grants a holder has, and which of them expire first.
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What you can do today, and where it stops
+      description: |
+        The combination of builders, decoders and `read()` that gets closest, and
+        the part that is missing or clumsy.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: The API you have in mind
+      description: Signature, return type, and what it throws.
+      render: typescript
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Is this a public API change?
+      description: |
+        Exports here are what an integrator's code compiles against. An additive
+        export is cheap; changing or removing one is the expensive kind and needs
+        a reason in the description.
+      options:
+        - Additive — a new export
+        - A change to an existing signature
+        - Internal — no export touched
+    validations:
+      required: true
+  - type: checkboxes
+    id: crossrepo
+    attributes:
+      label: Cross-repo cost
+      options:
+        - label: It needs a matching change in keygate-contracts or keygate-server, and I know which one
+          required: false
+  - type: checkboxes
+    id: willing
+    attributes:
+      label: Willingness
+      options:
+        - label: I would like to implement this, and will start with an issue to agree the shape
+          required: false
