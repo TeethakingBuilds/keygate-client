@@ -34,10 +34,9 @@ describe('the error tables', () => {
       2: 'NotInitialized',
       3: 'NotConfigured',
       4: 'Tripped',
-      5: 'Breached',
-      6: 'InvalidLimit',
-      7: 'InvalidWindow',
-      8: 'InvalidAmount',
+      5: 'InvalidLimit',
+      6: 'InvalidWindow',
+      7: 'InvalidAmount',
     });
     expect(CONTRACT_ERRORS.multisig).toEqual({
       1: 'AlreadyInitialized',
