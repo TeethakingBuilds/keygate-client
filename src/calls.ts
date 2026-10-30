@@ -111,7 +111,11 @@ export const breakerCalls = {
   configure: (resource: string, limit: bigint, windowSeconds: number | bigint): Call =>
     breaker('configure', [stringArg(resource), i128Arg(limit), u64Arg(BigInt(windowSeconds))]),
 
-  /** The only path that moves a counter, which is why it can trip. */
+  /**
+   * The only path that moves a counter, which is why it can trip. A breach is
+   * reported as the call's return value, not as an error, so that the latch the
+   * breach records survives the call — check it before moving value.
+   */
   enforce: (resource: string, amount: bigint): Call =>
     breaker('enforce', [stringArg(resource), i128Arg(amount)]),
 
@@ -156,6 +160,12 @@ export const multisigCalls = {
   execute: (caller: Address, id: number): Call =>
     multisig('execute', [addressArg(caller), u64Arg(BigInt(id))]),
 
+  /**
+   * The payload of a proposal that targets the multisig itself. Soroban will
+   * not re-enter a contract, so `execute` applies this rotation inline instead
+   * of relaying it — sending it straight to the multisig is not a transaction
+   * that can succeed.
+   */
   setOwners: (owners: readonly Address[], threshold: number): Call =>
     multisig('set_owners', [vecArg(owners.map(addressArg)), u32Arg(threshold)]),
 

@@ -48,6 +48,8 @@ describe('the error tables', () => {
       7: 'AlreadyExecuted',
       8: 'DuplicateApproval',
       9: 'QuorumNotMet',
+      10: 'UnknownSelfCall',
+      11: 'MalformedSelfCall',
     });
   });
 

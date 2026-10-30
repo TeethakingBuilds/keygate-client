@@ -46,6 +46,8 @@ export const CONTRACT_ERRORS: Record<ContractRole, Readonly<Record<number, strin
     7: 'AlreadyExecuted',
     8: 'DuplicateApproval',
     9: 'QuorumNotMet',
+    10: 'UnknownSelfCall',
+    11: 'MalformedSelfCall',
   },
 };
 
