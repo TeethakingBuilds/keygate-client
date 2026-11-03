@@ -112,8 +112,13 @@ runs on any `v*` tag and does the whole release: install from the lockfile,
 with `--provenance`, then a GitHub release with generated notes.
 
 1. Bump `version` in `package.json` in a normal pull request and let CI go green.
-2. Merge it, then tag the merge commit: `git tag v0.1.0 && git push origin v0.1.0`.
-3. Watch the Release workflow. The tag **must** equal `v` + the `package.json`
+2. Rehearse it if you want a log before tagging: Actions → **Release** →
+   _Run workflow_, with `tag` set to the tag you intend to push. A manual run
+   executes every step except the upload and the release, which are gated on
+   `github.event_name == 'push'` — a branch cannot publish, and both the matching
+   and mismatching tag cases can be checked this way.
+3. Merge it, then tag the merge commit: `git tag v0.1.0 && git push origin v0.1.0`.
+4. Watch the Release workflow. The tag **must** equal `v` + the `package.json`
    version; a mismatch fails the job before `check` and `build` run, so a typo
    costs a minute rather than a bad publish. Re-tag rather than editing a pushed
    tag in place.
@@ -127,9 +132,19 @@ Authentication is one of two setups, owned by a maintainer and never committed:
   workflow) lets npm mint an OIDC token instead.
 
 Either way `--provenance` attaches a signed link between the tarball and this
-commit, which is why the workflow asks for `id-token: write`. Everything else
-runs with `contents: read`, except the release step, which needs `contents: write`
-to create the GitHub release.
+commit, which is why the publish job asks for `id-token: write`. Both jobs run
+with `contents: read`; only the separate release job gets `contents: write`, so
+the step that uploads to npm never holds write access to the repository.
+
+Two things that will otherwise fail at the last step:
+
+- Node 20 bundles npm 10, and npm's OIDC publishing needs npm 11.5.1 or later. The
+  workflow therefore upgrades npm before publishing; the `NPM_TOKEN` path would
+  work either way.
+- Provenance is rejected by the registry (E422) unless `repository.url` in
+  `package.json` names the repository running the workflow. It does
+  (`TeethakingBuilds/keygate-client`), so releases must run there, not from a fork;
+  a fork needs its own package name and its own publish setup.
 
 A version that has already been published cannot be reused: npm rejects the
 upload, and the fix is a new version and a new tag. The package is unscoped

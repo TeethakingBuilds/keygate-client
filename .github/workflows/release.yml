@@ -2,10 +2,20 @@ name: Release
 
 # Publishing is a tag push, not a commit to main: `v0.1.0` and the version in
 # package.json must agree before anything leaves the runner.
+#
+# A manual run does everything except publish and create the release, so the
+# workflow can be rehearsed from a branch: Actions -> Release -> Run workflow,
+# with `tag` set to the tag you intend to push. Only a real `v*` tag publishes.
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to check as if it had been pushed, e.g. v0.1.0
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -15,11 +25,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: publish ${{ github.ref_name }}
+  publish:
+    name: publish ${{ inputs.tag || github.ref_name }}
     runs-on: ubuntu-latest
     permissions:
-      contents: write # gh release create
+      contents: read
       id-token: write # npm --provenance (sigstore attestation)
     steps:
       - name: Checkout
@@ -41,9 +51,12 @@ jobs:
         # Fails before the expensive steps: a tag that does not name the version
         # in package.json would publish under the wrong number or refuse to
         # publish at all, after check and build have already run.
+        env:
+          # Empty on a real tag push, where the tag is the ref that triggered us.
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
+          tag="${INPUT_TAG:-${GITHUB_REF_NAME}}"
           version="$(node -p "require('./package.json').version")"
           expected="v${version}"
           echo "tag=${tag}"
@@ -59,6 +72,13 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: npm 11 for trusted publishing
+        # Node 20 bundles npm 10, and npm's OIDC publishing needs 11.5.1 or
+        # later. The NPM_TOKEN path works on npm 10 too; this keeps both open.
+        run: |
+          npm install -g 'npm@^11.5.1'
+          npm --version
+
       - name: Verify the published surface
         # Everything `files` ships, and the two entry points it must contain.
         # `--dry-run` produces the tarball without uploading it; provenance is
@@ -73,6 +93,8 @@ jobs:
           grep -q 'README.md' /tmp/pack.txt
 
       - name: Publish to npm
+        # A manual run stops here: only a tag push may upload.
+        if: ${{ github.event_name == 'push' }}
         # NPM_TOKEN is a repository secret set by a maintainer. With npm trusted
         # publishing configured for this repository instead, no token is needed
         # and this env var is empty — npm then authenticates with the OIDC token
@@ -80,6 +102,18 @@ jobs:
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  release:
+    name: github release ${{ github.ref_name }}
+    needs: publish
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    # Separate job so the publish step above never holds write access.
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Create GitHub release
         run: gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes --title "${GITHUB_REF_NAME}"
