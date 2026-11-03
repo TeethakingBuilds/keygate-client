@@ -104,6 +104,54 @@ thresholds (80% lines and functions, 75% branches) are enforced by
 - By contributing you confirm you may license the change under Apache-2.0, and
   this project follows the [Code of Conduct](./CODE_OF_CONDUCT.md).
 
+## Releasing
+
+Publishing is a tag push, not a manual `npm publish`. `.github/workflows/release.yml`
+runs on any `v*` tag and does the whole release: install from the lockfile,
+`pnpm check`, `pnpm build`, a `--dry-run` look at the tarball's contents, publish
+with `--provenance`, then a GitHub release with generated notes.
+
+1. Bump `version` in `package.json` in a normal pull request and let CI go green.
+2. Rehearse it if you want a log before tagging: Actions → **Release** →
+   _Run workflow_, with `tag` set to the tag you intend to push. A manual run
+   executes every step except the upload and the release, which are gated on
+   `github.event_name == 'push'` — a branch cannot publish, and both the matching
+   and mismatching tag cases can be checked this way.
+3. Merge it, then tag the merge commit: `git tag v0.1.0 && git push origin v0.1.0`.
+4. Watch the Release workflow. The tag **must** equal `v` + the `package.json`
+   version; a mismatch fails the job before `check` and `build` run, so a typo
+   costs a minute rather than a bad publish. Re-tag rather than editing a pushed
+   tag in place.
+
+Authentication is one of two setups, owned by a maintainer and never committed:
+
+- **Token:** add a granular npm token with publish rights as the repository
+  secret `NPM_TOKEN`. The workflow passes it to npm as `NODE_AUTH_TOKEN`.
+- **Trusted publishing:** configure this repository and workflow in the package's
+  npm settings and leave `NPM_TOKEN` unset. `id-token: write` (already in the
+  workflow) lets npm mint an OIDC token instead.
+
+Either way `--provenance` attaches a signed link between the tarball and this
+commit, which is why the publish job asks for `id-token: write`. Both jobs run
+with `contents: read`; only the separate release job gets `contents: write`, so
+the step that uploads to npm never holds write access to the repository.
+
+Two things that will otherwise fail at the last step:
+
+- Node 20 bundles npm 10, and npm's OIDC publishing needs npm 11.5.1 or later. The
+  workflow therefore upgrades npm before publishing; the `NPM_TOKEN` path would
+  work either way.
+- Provenance is rejected by the registry (E422) unless `repository.url` in
+  `package.json` names the repository running the workflow. It does
+  (`TeethakingBuilds/keygate-client`), so releases must run there, not from a fork;
+  a fork needs its own package name and its own publish setup.
+
+A version that has already been published cannot be reused: npm rejects the
+upload, and the fix is a new version and a new tag. The package is unscoped
+(`keygate-client`); if a name change is ever needed, agree on the scoped name in
+an issue first, then change `name` in `package.json` and the install line in
+[README.md](./README.md) together.
+
 ## What this project will not add
 
 Account funding and friendbot, time bounds, fee bumping, transaction batching, a
