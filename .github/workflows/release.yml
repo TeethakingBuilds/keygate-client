@@ -1,0 +1,87 @@
+name: Release
+
+# Publishing is a tag push, not a commit to main: `v0.1.0` and the version in
+# package.json must agree before anything leaves the runner.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: publish ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # gh release create
+      id-token: write # npm --provenance (sigstore attestation)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Enable pnpm from packageManager
+        run: corepack enable
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Tag matches package.json
+        # Fails before the expensive steps: a tag that does not name the version
+        # in package.json would publish under the wrong number or refuse to
+        # publish at all, after check and build have already run.
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="$(node -p "require('./package.json').version")"
+          expected="v${version}"
+          echo "tag=${tag}"
+          echo "package.json version=${version}"
+          if [ "${tag}" != "${expected}" ]; then
+            echo "::error::tag ${tag} does not match package.json version (expected ${expected})"
+            exit 1
+          fi
+
+      - name: Check
+        run: pnpm check
+
+      - name: Build
+        run: pnpm build
+
+      - name: Verify the published surface
+        # Everything `files` ships, and the two entry points it must contain.
+        # `--dry-run` produces the tarball without uploading it; provenance is
+        # only attached by the real publish below.
+        run: |
+          set -euo pipefail
+          npm publish --dry-run --access public
+          npm pack --dry-run 2>&1 | tee /tmp/pack.txt
+          grep -q 'dist/index.js' /tmp/pack.txt
+          grep -q 'dist/index.d.ts' /tmp/pack.txt
+          grep -q 'LICENSE' /tmp/pack.txt
+          grep -q 'README.md' /tmp/pack.txt
+
+      - name: Publish to npm
+        # NPM_TOKEN is a repository secret set by a maintainer. With npm trusted
+        # publishing configured for this repository instead, no token is needed
+        # and this env var is empty — npm then authenticates with the OIDC token
+        # that `id-token: write` mints. Never commit a token.
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub release
+        run: gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes --title "${GITHUB_REF_NAME}"
+        env:
+          GH_TOKEN: ${{ github.token }}
