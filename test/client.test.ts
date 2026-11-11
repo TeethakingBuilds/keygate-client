@@ -6,7 +6,7 @@ import {
   xdr,
   type Transaction,
 } from '@stellar/stellar-sdk';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { asBool, toScVal } from '../src/abi.js';
 import { KeygateClient, type ContractAddresses } from '../src/client.js';
@@ -480,6 +480,153 @@ describe('send', () => {
     expect(result.appliedAt).toBe(1_800_000_600);
     expect(invoked(host.submitted[0] as Transaction).functionName).toBe(call.func);
   });
+});
+
+describe('commit polling', () => {
+  const start = 1_800_000_000_000;
+  const interval = 100;
+  const call = { role: 'core' as const, func: 'pause', args: [] };
+  const missing: CommitOutcome = {
+    status: 'not_found',
+    ledger: 0,
+    createdAt: 0,
+    returnValue: undefined,
+    latestLedger: 1_001,
+  };
+
+  function pollingClient(host: FakeHost, commitTimeoutMs = 1_000): KeygateClient {
+    return new KeygateClient({
+      host,
+      contracts: CONTRACT_ADDRESSES,
+      networkPassphrase: PASSPHRASE,
+      signer: keypairSigner(HOLDER),
+      pollIntervalMs: interval,
+      commitTimeoutMs,
+    });
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(start);
+  });
+
+  afterEach(() => {
+    try {
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([0, 1_000])('looks up immediately even with a %i ms timeout', async (timeout) => {
+    const host = new FakeHost();
+    const pending = pollingClient(host, timeout).send(call);
+
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(Date.now()).toBe(start);
+    expect(host.commitCalls).toEqual([TX_HASH]);
+    expect(host.submitted).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+    await expect(pending).resolves.toMatchObject({ hash: TX_HASH, ledger: 4_999 });
+  });
+
+  it('waits a positive interval between lookups and never resubmits while polling', async () => {
+    const host = new FakeHost();
+    host.commitQueue = [missing, missing, SUCCESS_COMMIT];
+    const pending = pollingClient(host).send(call);
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(host.commitCalls).toEqual([TX_HASH]);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(interval - 1);
+    expect(host.commitCalls).toEqual([TX_HASH]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(host.commitCalls).toEqual([TX_HASH, TX_HASH]);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(interval - 1);
+    expect(host.commitCalls).toEqual([TX_HASH, TX_HASH]);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toMatchObject({ hash: TX_HASH, ledger: 4_999 });
+    expect(host.commitCalls).toEqual([TX_HASH, TX_HASH, TX_HASH]);
+    expect(host.accountCalls).toEqual([HOLDER.publicKey()]);
+    expect(host.simulated).toHaveLength(1);
+    expect(host.submitted).toHaveLength(1);
+  });
+
+  it.each([
+    { timeout: 200, elapsed: 200, lookups: 3, boundary: 'on' },
+    { timeout: 250, elapsed: 300, lookups: 4, boundary: 'after' },
+  ])(
+    'times out $boundary the deadline after repeated not_found replies, preserving the hash',
+    async ({ timeout, elapsed, lookups }) => {
+      const host = new FakeHost();
+      host.commitDefault = missing;
+      // Attach the rejection handler before advancing the clock.
+      const pending = pollingClient(host, timeout)
+        .send(call)
+        .catch((error: unknown) => error);
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(host.commitCalls).toEqual([TX_HASH]);
+      await vi.advanceTimersByTimeAsync(elapsed - 1);
+      expect(host.commitCalls).toEqual(Array.from({ length: lookups - 1 }, () => TX_HASH));
+      expect(vi.getTimerCount()).toBe(1);
+      // Only the next lookup's not_found reply triggers timeout.
+      await vi.advanceTimersByTimeAsync(1);
+
+      const error = await pending;
+      expect(error).toBeInstanceOf(CommitTimeoutError);
+      expect(error).toMatchObject({ hash: TX_HASH });
+      expect((error as Error).message).toContain('may still land');
+      expect(Date.now()).toBe(start + elapsed);
+      expect(host.commitCalls).toEqual(Array.from({ length: lookups }, () => TX_HASH));
+      expect(host.accountCalls).toEqual([HOLDER.publicKey()]);
+      expect(host.simulated).toHaveLength(1);
+      expect(host.submitted).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    { status: 'success' as const, timeout: 100, boundary: 'on' },
+    { status: 'success' as const, timeout: 75, boundary: 'after' },
+    { status: 'failed' as const, timeout: 100, boundary: 'on' },
+    { status: 'failed' as const, timeout: 75, boundary: 'after' },
+  ])(
+    'honours $status $boundary the deadline instead of timing out',
+    async ({ status, timeout }) => {
+      const host = new FakeHost();
+      host.commitQueue = [missing, { ...SUCCESS_COMMIT, status }];
+      const pending = pollingClient(host, timeout)
+        .send(call)
+        .catch((error: unknown) => error);
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(host.commitCalls).toEqual([TX_HASH]);
+      await vi.advanceTimersByTimeAsync(interval - 1);
+      expect(host.commitCalls).toEqual([TX_HASH]);
+      await vi.advanceTimersByTimeAsync(1);
+
+      const outcome = await pending;
+      if (status === 'success') {
+        expect(outcome).toEqual({
+          hash: TX_HASH,
+          ledger: SUCCESS_COMMIT.ledger,
+          appliedAt: SUCCESS_COMMIT.createdAt,
+          returnValue: SUCCESS_COMMIT.returnValue,
+        });
+      } else {
+        expect(outcome).toBeInstanceOf(TransactionFailedError);
+        expect(outcome).toMatchObject({ hash: TX_HASH });
+      }
+      expect(Date.now()).toBe(start + interval);
+      expect(host.commitCalls).toEqual([TX_HASH, TX_HASH]);
+      expect(host.submitted).toHaveLength(1);
+    },
+  );
 });
 
 describe('configuration', () => {

@@ -63,6 +63,33 @@ signing, footprint and resource fee, submit, poll for commit — and returns the
 hash, the ledger it landed in, and the call's return value. Reads stop after
 simulation, which is why `hasAccess` costs no transaction fee and needs no key.
 
+Decode a breaker's `enforce` result only when `SendResult.returnValue` is defined:
+
+```ts
+import { breakerCalls, decodeBreakerOutcome } from 'keygate-client';
+
+const result = await client.send(breakerCalls.enforce('vault:main', 500n));
+if (result.returnValue === undefined) {
+  throw new Error(`No breaker outcome available for ${result.hash}`);
+}
+const outcome = decodeBreakerOutcome(result.returnValue);
+if (outcome === 'breached') {
+  // A normal return value, not a contract-call error: do not move value.
+  console.warn(`Breaker breached: ${result.hash}`);
+} else {
+  console.log(`Breaker reported ${outcome}: ${result.hash}`);
+}
+```
+
+The decoder returns `'charged'` or `'breached'` from Soroban's singleton vector
+containing the symbol `Charged` or `Breached`, not a numeric discriminant. A
+breach returns normally so the contract's latch can persist; it is not a
+`ContractRejectedError`. Malformed outcomes throw contextual `TypeError`s.
+`returnValue` may be the pre-submission simulation fallback when the node omits
+its committed return value. Decoding `'charged'` therefore is **not proof of a
+committed charge**, nor is it a budget reservation for a later transfer. Couple
+enforcement and moving value atomically on-chain when that guarantee is needed.
+
 Every read is a simulation, so it also runs the contract's own checks —
 `SimulationRejectedError` means the call was refused, and nothing reached the
 ledger. Note that a simulation is charged to the null account with no

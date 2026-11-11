@@ -213,6 +213,9 @@ export interface BreakerStateInfo {
   readonly tripped: boolean;
 }
 
+/** The normal return value of `keygate-circuit-breaker`'s `enforce`. */
+export type BreakerOutcome = 'charged' | 'breached';
+
 /**
  * `Proposal` in `keygate-multisig`.
  *
@@ -266,6 +269,27 @@ export function decodeBreakerState(scval: xdr.ScVal, context = 'state'): Breaker
     used: asI128(field(fields, 'used', context), `${context}.used`),
     tripped: asBool(field(fields, 'tripped', context), `${context}.tripped`),
   };
+}
+
+/** Soroban encodes this enum as a singleton vector containing the variant symbol. */
+export function decodeBreakerOutcome(
+  scval: xdr.ScVal,
+  context = 'breaker.enforce',
+): BreakerOutcome {
+  const values = asVec(scval, context);
+  expect(
+    Array.isArray(values) && values.length === 1,
+    `${context}: expected singleton vec containing an outcome variant`,
+  );
+  const variant = asSymbol(values[0] as xdr.ScVal, `${context}[0]`);
+  switch (variant) {
+    case 'Charged':
+      return 'charged';
+    case 'Breached':
+      return 'breached';
+    default:
+      throw new TypeError(`${context}: unknown breaker outcome variant '${variant}'`);
+  }
 }
 
 export function decodeProposal(scval: xdr.ScVal, context = 'proposal'): ProposalInfo {

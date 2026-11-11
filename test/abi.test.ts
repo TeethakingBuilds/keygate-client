@@ -33,6 +33,7 @@ import {
   vecArg,
   type AbiArg,
 } from '../src/types.js';
+import { decodeBreakerOutcome, type BreakerOutcome } from '../src/index.js';
 
 const CONTRACT = Keypair.random().publicKey();
 const ACCOUNT = Keypair.random().publicKey();
@@ -243,6 +244,105 @@ describe('struct decoders', () => {
         vec(mapOf(entry('resource', str('vault:main')), entry('action', str('withdraw')))),
       ),
     ).toEqual([{ resource: 'vault:main', action: 'withdraw' }]);
+  });
+});
+
+describe('decodeBreakerOutcome', () => {
+  const outcomes: [string, BreakerOutcome][] = [
+    ['Charged', 'charged'],
+    ['Breached', 'breached'],
+  ];
+
+  it.each(outcomes)(
+    'decodes the %s symbol variant through the package root',
+    (variant, outcome) => {
+      expect(decodeBreakerOutcome(overTheWire(vec(symbolValue(variant))))).toBe(outcome);
+    },
+  );
+
+  const context = 'response.breaker';
+  const singletonError = `${context}: expected singleton vec containing an outcome variant`;
+  const errorValue = xdr.ScVal.scvError(xdr.ScError.sceContract(4));
+
+  it.each([
+    {
+      name: 'an unknown variant',
+      value: vec(symbolValue('Unknown')),
+      message: `${context}: unknown breaker outcome variant 'Unknown'`,
+    },
+    {
+      name: 'a lowercase charged variant',
+      value: vec(symbolValue('charged')),
+      message: `${context}: unknown breaker outcome variant 'charged'`,
+    },
+    {
+      name: 'a lowercase breached variant',
+      value: vec(symbolValue('breached')),
+      message: `${context}: unknown breaker outcome variant 'breached'`,
+    },
+    { name: 'an empty vector', value: vec(), message: singletonError },
+    {
+      name: 'a multi-element vector',
+      value: vec(symbolValue('Charged'), symbolValue('Breached')),
+      message: singletonError,
+    },
+    { name: 'a null vector', value: xdr.ScVal.scvVec(null), message: singletonError },
+    {
+      name: 'a numeric root',
+      value: sml(0),
+      message: `${context}: expected vec, got scvU32`,
+    },
+    {
+      name: 'a bare symbol root',
+      value: symbolValue('Charged'),
+      message: `${context}: expected vec, got scvSymbol`,
+    },
+    {
+      name: 'a string root',
+      value: str('Breached'),
+      message: `${context}: expected vec, got scvString`,
+    },
+    {
+      name: 'a map root',
+      value: mapOf(),
+      message: `${context}: expected vec, got scvMap`,
+    },
+    {
+      name: 'a contract error root',
+      value: errorValue,
+      message: `${context}: expected vec, got scvError`,
+    },
+    {
+      name: 'a numeric element',
+      value: vec(sml(1)),
+      message: `${context}[0]: expected symbol, got scvU32`,
+    },
+    {
+      name: 'a string element',
+      value: vec(str('Charged')),
+      message: `${context}[0]: expected symbol, got scvString`,
+    },
+    {
+      name: 'a vector element',
+      value: vec(vec(symbolValue('Charged'))),
+      message: `${context}[0]: expected symbol, got scvVec`,
+    },
+    {
+      name: 'a contract error element',
+      value: vec(errorValue),
+      message: `${context}[0]: expected symbol, got scvError`,
+    },
+  ])('rejects $name with a contextual TypeError', ({ value, message }) => {
+    const received = overTheWire(value);
+    const decode = () => decodeBreakerOutcome(received, context);
+    expect(decode).toThrow(TypeError);
+    expect(decode).toThrow(message);
+  });
+
+  it('defaults the error context to the enforcing call', () => {
+    expect(() => decodeBreakerOutcome(overTheWire(vec(symbolValue('Unknown'))))).toThrow(
+      "breaker.enforce: unknown breaker outcome variant 'Unknown'",
+    );
   });
 });
 
