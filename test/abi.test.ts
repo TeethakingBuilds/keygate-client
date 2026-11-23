@@ -46,12 +46,11 @@ const sml = (value: number): xdr.ScVal => toScVal(u32Arg(value));
 const big = (value: bigint): xdr.ScVal => toScVal(i128Arg(value));
 const flag = (value: boolean): xdr.ScVal => toScVal(boolArg(value));
 const vec = (...items: (xdr.ScVal | AbiArg)[]): xdr.ScVal =>
-  xdr.ScVal.scvVec(items.map((item) => ('switch' in item ? item : toScVal(item))));
+  xdr.ScVal.scvVec(items.map((item) => (xdr.ScVal.is(item) ? item : toScVal(item))));
 const symbolValue = (value: string): xdr.ScVal => toScVal(symbolArg(value));
 
 function entry(key: string, value: xdr.ScVal): xdr.ScMapEntry {
-  // `ScMapEntry` fields are accessor methods in this SDK, so a plain object
-  // literal type-checks but fails to encode.
+  // A map entry is a plain `{ key, val }` object in this SDK.
   return new xdr.ScMapEntry({ key: symbolValue(key), val: value });
 }
 
@@ -66,20 +65,20 @@ function overTheWire(value: xdr.ScVal): xdr.ScVal {
 
 describe('toScVal', () => {
   it('lifts every argument kind to the Soroban type the contract declares', () => {
-    expect(toScVal(stringArg('vault:main')).switch().name).toBe('scvString');
-    expect(toScVal(symbolArg('withdraw')).switch().name).toBe('scvSymbol');
-    expect(toScVal(boolArg(true)).switch().name).toBe('scvBool');
-    expect(toScVal(u32Arg(1)).switch().name).toBe('scvU32');
-    expect(toScVal(u64Arg(1_000n)).switch().name).toBe('scvU64');
-    expect(toScVal(i128Arg(1_000n)).switch().name).toBe('scvI128');
-    expect(toScVal(vecArg([stringArg('a')])).switch().name).toBe('scvVec');
+    expect(toScVal(stringArg('vault:main')).type).toBe('scvString');
+    expect(toScVal(symbolArg('withdraw')).type).toBe('scvSymbol');
+    expect(toScVal(boolArg(true)).type).toBe('scvBool');
+    expect(toScVal(u32Arg(1)).type).toBe('scvU32');
+    expect(toScVal(u64Arg(1_000n)).type).toBe('scvU64');
+    expect(toScVal(i128Arg(1_000n)).type).toBe('scvI128');
+    expect(toScVal(vecArg([stringArg('a')])).type).toBe('scvVec');
   });
 
   it('turns a strkey into an address rather than a string', () => {
     // `nativeToScVal('G…')` yields an `scvString`, which a contract expecting
     // `Address` rejects at the host layer — the trap this module exists to remove.
-    expect(toScVal(addressArg(ACCOUNT)).switch().name).toBe('scvAddress');
-    expect(nativeToScVal(ACCOUNT).switch().name).toBe('scvString');
+    expect(toScVal(addressArg(ACCOUNT)).type).toBe('scvAddress');
+    expect(nativeToScVal(ACCOUNT).type).toBe('scvString');
   });
 
   it('refuses an address that is not a strkey', () => {
@@ -88,13 +87,13 @@ describe('toScVal', () => {
 
   it('encodes nested vectors', () => {
     const encoded = toScVal(vecArg([addressArg(ACCOUNT), addressArg(CONTRACT)]));
-    expect(overTheWire(encoded).value()).toHaveLength(2);
+    expect(overTheWire(encoded).value).toHaveLength(2);
     expect(decodeAddresses(overTheWire(encoded))).toEqual([ACCOUNT, CONTRACT]);
   });
 
   it('encodes the argument list of a call in order', () => {
     const args = encodeArgs([stringArg('vault:main'), u64Arg(60n), boolArg(false)]);
-    expect(args.map((arg) => arg.switch().name)).toEqual(['scvString', 'scvU64', 'scvBool']);
+    expect(args.map((arg) => arg.type)).toEqual(['scvString', 'scvU64', 'scvBool']);
   });
 
   it('bounds every integer tag by the type it names', () => {
@@ -233,7 +232,7 @@ describe('struct decoders', () => {
     expect(decoded.func).toBe('pause');
     expect(decoded.executed).toBe(false);
     // Raw, so the caller can decode a relayed `pause()` with no arguments as-is.
-    expect(decoded.args.map((arg) => arg.switch().name)).toEqual([]);
+    expect(decoded.args.map((arg) => arg.type)).toEqual([]);
   });
 
   it('decodes the list-shaped reads', () => {
@@ -378,7 +377,7 @@ describe('contractErrorCode', () => {
     expect(contractErrorCode(flag(true))).toBeUndefined();
     expect(
       contractErrorCode(
-        xdr.ScVal.scvError(xdr.ScError.sceWasmVm(xdr.ScErrorCode.scecInternalError())),
+        xdr.ScVal.scvError(xdr.ScError.sceWasmVm(xdr.ScErrorCode.scecInternalError)),
       ),
     ).toBeUndefined();
   });

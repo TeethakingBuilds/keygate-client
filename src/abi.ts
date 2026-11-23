@@ -45,7 +45,7 @@ export function toScVal(arg: AbiArg): xdr.ScVal {
     case 'i128':
       return nativeToScVal(arg.value, { type: 'i128' });
     case 'bool':
-      return nativeToScVal(arg.value, { type: 'boolean' });
+      return nativeToScVal(arg.value, { type: 'bool' });
     case 'vec':
       return xdr.ScVal.scvVec(arg.value.map(toScVal));
   }
@@ -56,23 +56,21 @@ export function encodeArgs(args: readonly AbiArg[]): xdr.ScVal[] {
 }
 
 export function isNone(scval: xdr.ScVal): boolean {
-  return scval.switch().name === NONE_TAG;
+  return scval.type === NONE_TAG;
 }
 
 /**
- * Unions are read through `switch().name` and `value()` rather than the helper
- * named after the arm. js-xdr defines one setter per switch value and one getter
- * per arm, and where the two names differ the obvious accessor is the setter:
- * `body.invokeHostFunction()` silently returns `undefined` instead of the
- * operation. `switch()`/`value()` are correct for every union, so nothing here
- * depends on which of the two names a given arm happens to use.
+ * Unions are read through the `type` discriminant and the `value` getter.
+ * In js-xdr v4 (stellar-sdk 17) every union variant is a class with a literal
+ * `type` and a `value` getter holding the arm — no per-arm setter/getter
+ * naming to trip over, and no `switch()`/`value()` calls.
  */
 function tag(scval: xdr.ScVal): string {
-  return scval.switch().name;
+  return scval.type;
 }
 
 function raw(scval: xdr.ScVal): unknown {
-  return scval.value();
+  return scval.value;
 }
 
 /**
@@ -83,8 +81,8 @@ function raw(scval: xdr.ScVal): unknown {
  * already split as `-1 * 2^64 + (2^64 - n)`.
  */
 function combine128(value: unknown): bigint {
-  const halves = value as { hi(): unknown; lo(): unknown };
-  return BigInt(String(halves.hi())) * TWO_POW_64 + BigInt(String(halves.lo()));
+  const halves = value as { hi: bigint; lo: bigint };
+  return halves.hi * TWO_POW_64 + halves.lo;
 }
 
 function expect(condition: boolean, message: string): asserts condition {
@@ -138,15 +136,14 @@ export function asString(scval: xdr.ScVal, context: string): string {
 }
 
 export function asSymbol(scval: xdr.ScVal, context: string): string {
-  expect(
-    tag(scval) === 'scvSymbol' || tag(scval) === 'scvSymbolSmall',
-    `${context}: expected symbol, got ${tag(scval)}`,
-  );
+  expect(tag(scval) === 'scvSymbol', `${context}: expected symbol, got ${tag(scval)}`);
   return String(raw(scval));
 }
 
 export function asAddress(scval: xdr.ScVal, context: string): Strkey {
   expect(tag(scval) === 'scvAddress', `${context}: expected address, got ${tag(scval)}`);
+  // The arm is an `ScAddress`, not the strkey itself — `toJSON` prints it as
+  // one, which is easy to mistake for the value.
   return Address.fromScAddress(raw(scval) as xdr.ScAddress).toString();
 }
 
@@ -158,10 +155,10 @@ export function asVec(scval: xdr.ScVal, context: string): xdr.ScVal[] {
 /** Reads a contract struct as a name → field map, rejecting anything else. */
 export function asMap(scval: xdr.ScVal, context: string): Map<string, xdr.ScVal> {
   expect(tag(scval) === 'scvMap', `${context}: expected map, got ${tag(scval)}`);
-  const entries = raw(scval) as { key(): xdr.ScVal; val(): xdr.ScVal }[];
+  const entries = raw(scval) as { key: xdr.ScVal; val: xdr.ScVal }[];
   const fields = new Map<string, xdr.ScVal>();
   for (const entry of entries) {
-    fields.set(asSymbol(entry.key(), `${context}: map key`), entry.val());
+    fields.set(asSymbol(entry.key, `${context}: map key`), entry.val);
   }
   return fields;
 }
@@ -339,9 +336,9 @@ export function contractErrorCode(scval: xdr.ScVal): number | undefined {
   if (tag(scval) !== 'scvError') {
     return undefined;
   }
-  const error = scval.value() as { switch(): { name: string }; value(): unknown };
-  if (error.switch().name !== 'sceContract') {
+  const error = raw(scval) as xdr.ScError;
+  if (error.type !== 'sceContract') {
     return undefined;
   }
-  return Number(error.value());
+  return error.contractCode;
 }

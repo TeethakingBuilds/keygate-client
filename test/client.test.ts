@@ -8,7 +8,7 @@ import {
 } from '@stellar/stellar-sdk';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { asBool, toScVal } from '../src/abi.js';
+import { asBool, asU32, asVec, toScVal } from '../src/abi.js';
 import { KeygateClient, type ContractAddresses } from '../src/client.js';
 import {
   ConfigurationError,
@@ -19,7 +19,7 @@ import {
 } from '../src/errors.js';
 import type { CommitOutcome, LedgerHost, SimulationOutcome, SubmitOutcome } from '../src/host.js';
 import { keypairSigner } from '../src/signer.js';
-import { addressArg, boolArg, stringArg } from '../src/types.js';
+import { addressArg, boolArg, i128Arg, stringArg, symbolArg, u64Arg } from '../src/types.js';
 import {
   BREAKER,
   CORE,
@@ -113,18 +113,26 @@ function clientFor(host: FakeHost): KeygateClient {
 
 /** The host function the transaction actually carries, decoded from its envelope. */
 function invoked(tx: Transaction) {
-  const body = tx.toEnvelope().v1().tx().operations()[0]?.body();
-  // Not `body.invokeHostFunction()`: for `OperationBody` that name is js-xdr's
-  // switch-based setter, and it returns `undefined`. See `abi.ts`.
-  const operation = body?.value() as xdr.InvokeHostFunctionOp | undefined;
-  if (operation === undefined) throw new Error('no invokeHostFunction operation');
-  const contract = operation.hostFunction().invokeContract();
+  const envelope = tx.toEnvelope();
+  if (envelope.type !== 'envelopeTypeTx') {
+    throw new Error(`unexpected envelope type ${envelope.type}`);
+  }
+  const body = envelope.v1.tx.operations[0]?.body;
+  if (body?.type !== 'invokeHostFunction') {
+    throw new Error('no invokeHostFunction operation');
+  }
+  const operation = body.invokeHostFunctionOp;
+  if (operation.hostFunction.type !== 'hostFunctionTypeInvokeContract') {
+    throw new Error('no invokeContract host function');
+  }
+  const contract = operation.hostFunction.invokeContract;
+  const ext = envelope.v1.tx.ext;
   return {
-    contract: contract.contractAddress().toXDR('hex'),
-    functionName: String(contract.functionName()),
-    args: contract.args(),
-    auth: operation.auth(),
-    footprint: tx.toEnvelope().v1().tx().ext().sorobanData(),
+    contract: contract.contractAddress.toXDR('hex'),
+    functionName: String(contract.functionName),
+    args: contract.args,
+    auth: operation.auth ?? [],
+    footprint: ext.type === 'sorobanData' ? ext.sorobanData : undefined,
   };
 }
 
@@ -154,7 +162,7 @@ describe('read', () => {
     expect(call.functionName).toBe('check');
     expect(scValToNative(call.args[0] as xdr.ScVal)).toBe('vault:main');
     expect(scValToNative(call.args[1] as xdr.ScVal)).toBe('withdraw');
-    expect(call.args[2]?.switch().name).toBe('scvAddress');
+    expect(call.args[2]?.type).toBe('scvAddress');
   });
 
   it('turns a node refusal into the contract error it names', async () => {
@@ -213,6 +221,224 @@ describe('read', () => {
     const call = invoked(host.simulated[0] as Transaction);
     expect(call.functionName).toBe('state');
     expect(call.args).toHaveLength(1);
+  });
+});
+
+describe('multisig reads', () => {
+  /** A proposal the way the multisig contract returns one. */
+  function proposalValue(): xdr.ScVal {
+    const entry = (key: string, value: xdr.ScVal): xdr.ScMapEntry =>
+      new xdr.ScMapEntry({ key: toScVal(symbolArg(key)), val: value });
+    return xdr.ScVal.scvMap([
+      entry('id', toScVal(u64Arg(7n))),
+      entry('target', toScVal(addressArg(CORE))),
+      entry('func', toScVal(symbolArg('pause'))),
+      entry('args', xdr.ScVal.scvVec([])),
+      entry('approvals', xdr.ScVal.scvVec([toScVal(addressArg(HOLDER.publicKey()))])),
+      entry('executed', toScVal(boolArg(false))),
+      entry('proposed_at', toScVal(u64Arg(1_800_000_000n))),
+    ]);
+  }
+
+  it('decodes a proposal and calls the multisig contract for it', async () => {
+    const host = new FakeHost();
+    host.simulation = { retval: proposalValue() };
+
+    const proposal = await clientFor(host).proposal(7);
+
+    expect(proposal).toEqual({
+      id: 7,
+      target: CORE,
+      func: 'pause',
+      args: [],
+      approvals: [HOLDER.publicKey()],
+      executed: false,
+      proposedAt: 1_800_000_000,
+    });
+    const call = invoked(host.simulated[0] as Transaction);
+    expect(call.functionName).toBe('proposal');
+    expect(call.contract).toBe(new Address(MULTISIG).toScAddress().toXDR('hex'));
+    expect(scValToNative(call.args[0] as xdr.ScVal)).toBe(7n);
+  });
+
+  it('returns null for an unknown proposal id', async () => {
+    const host = new FakeHost();
+    host.simulation = { retval: xdr.ScVal.scvLedgerKeyContractInstance() };
+
+    await expect(clientFor(host).proposal(99)).resolves.toBeNull();
+  });
+
+  it('names the missing field when a proposal is malformed', async () => {
+    const host = new FakeHost();
+    const malformed = xdr.ScVal.scvMap([
+      new xdr.ScMapEntry({
+        key: toScVal(symbolArg('id')),
+        val: toScVal(u64Arg(7n)),
+      }),
+    ]);
+    host.simulation = { retval: malformed };
+
+    await expect(clientFor(host).proposal(7)).rejects.toThrow(
+      /multisig\.proposal: missing field 'target'/,
+    );
+  });
+
+  it('lists the live proposal ids', async () => {
+    const host = new FakeHost();
+    host.simulation = {
+      retval: xdr.ScVal.scvVec([1n, 2n, 3n].map((id) => toScVal(u64Arg(id)))),
+    };
+
+    await expect(clientFor(host).pendingProposals()).resolves.toEqual([1, 2, 3]);
+    expect(invoked(host.simulated[0] as Transaction).functionName).toBe('live_ids');
+  });
+
+  it('returns an empty list when nothing is pending', async () => {
+    const host = new FakeHost();
+    host.simulation = { retval: xdr.ScVal.scvVec([]) };
+
+    await expect(clientFor(host).pendingProposals()).resolves.toEqual([]);
+  });
+
+  it('reads who approved a proposal', async () => {
+    const host = new FakeHost();
+    host.simulation = {
+      retval: xdr.ScVal.scvVec([
+        toScVal(addressArg(HOLDER.publicKey())),
+        toScVal(addressArg(OTHER.publicKey())),
+      ]),
+    };
+
+    await expect(clientFor(host).approvals(7)).resolves.toEqual([
+      HOLDER.publicKey(),
+      OTHER.publicKey(),
+    ]);
+    expect(invoked(host.simulated[0] as Transaction).functionName).toBe('approvals');
+  });
+
+  it('reads the owner set, the threshold and one owner check', async () => {
+    const host = new FakeHost();
+    host.simulation = {
+      retval: xdr.ScVal.scvVec([toScVal(addressArg(HOLDER.publicKey()))]),
+    };
+    await expect(clientFor(host).owners()).resolves.toEqual([HOLDER.publicKey()]);
+
+    host.simulation = { retval: xdr.ScVal.scvU32(2) };
+    await expect(clientFor(host).threshold()).resolves.toBe(2);
+
+    host.simulation = { retval: xdr.ScVal.scvBool(true) };
+    await expect(clientFor(host).isOwner(HOLDER.publicKey())).resolves.toBe(true);
+    expect(invoked(host.simulated[2] as Transaction).functionName).toBe('is_owner');
+  });
+
+  it('needs no signer: reads work on a client built without one', async () => {
+    const host = new FakeHost();
+    const client = new KeygateClient({
+      host,
+      contracts: CONTRACT_ADDRESSES,
+      networkPassphrase: PASSPHRASE,
+    });
+    host.simulation = { retval: xdr.ScVal.scvVec([]) };
+
+    await expect(client.pendingProposals()).resolves.toEqual([]);
+    expect(host.submitted).toEqual([]);
+    expect(host.accountCalls).toEqual([]);
+  });
+});
+
+describe('breaker monitoring reads', () => {
+  /** A breaker configuration the way the contract returns one. */
+  function configValue(limit: bigint, windowSeconds: bigint): xdr.ScVal {
+    const entry = (key: string, value: xdr.ScVal): xdr.ScMapEntry =>
+      new xdr.ScMapEntry({ key: toScVal(symbolArg(key)), val: value });
+    return xdr.ScVal.scvMap([
+      entry('limit', toScVal(i128Arg(limit))),
+      entry('window', toScVal(u64Arg(windowSeconds))),
+    ]);
+  }
+
+  it('decodes a configuration for a configured resource', async () => {
+    const host = new FakeHost();
+    host.simulation = { retval: configValue(1_000n, 3_600n) };
+
+    await expect(clientFor(host).breakerConfig('vault:main')).resolves.toEqual({
+      limit: 1_000n,
+      windowSeconds: 3_600,
+    });
+    const call = invoked(host.simulated[0] as Transaction);
+    expect(call.functionName).toBe('config');
+    expect(call.contract).toBe(new Address(BREAKER).toScAddress().toXDR('hex'));
+  });
+
+  it('returns null for a resource that was never configured', async () => {
+    const host = new FakeHost();
+    host.simulation = { retval: xdr.ScVal.scvLedgerKeyContractInstance() };
+
+    await expect(clientFor(host).breakerConfig('vault:main')).resolves.toBeNull();
+  });
+
+  it('names the missing field when a configuration is malformed', async () => {
+    const host = new FakeHost();
+    const malformed = xdr.ScVal.scvMap([
+      new xdr.ScMapEntry({
+        key: toScVal(symbolArg('limit')),
+        val: toScVal(i128Arg(1_000n)),
+      }),
+    ]);
+    host.simulation = { retval: malformed };
+
+    await expect(clientFor(host).breakerConfig('vault:main')).rejects.toThrow(
+      /breaker\.config: missing field 'window'/,
+    );
+  });
+
+  it('reads the remaining headroom, including very large values', async () => {
+    const host = new FakeHost();
+    host.simulation = { retval: toScVal(i128Arg(2n ** 100n)) };
+
+    await expect(clientFor(host).breakerRemaining('vault:main')).resolves.toBe(2n ** 100n);
+    const call = invoked(host.simulated[0] as Transaction);
+    expect(call.functionName).toBe('remaining');
+    expect(scValToNative(call.args[0] as xdr.ScVal)).toBe('vault:main');
+  });
+
+  it('keeps an unconfigured remaining a refusal, not a zero', async () => {
+    const host = new FakeHost();
+    host.simulation = {
+      error: 'Error(Host, Error(Contract, #3))',
+      retval: undefined,
+      sorobanData: undefined,
+    };
+
+    const error = await clientFor(host)
+      .breakerRemaining('vault:main')
+      .catch((thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(SimulationRejectedError);
+    expect((error as SimulationRejectedError).code).toBe(3);
+    expect((error as SimulationRejectedError).role).toBe('breaker');
+    expect((error as SimulationRejectedError).func).toBe('remaining');
+    expect((error as Error).message).toContain('NotConfigured');
+    expect(host.submitted).toEqual([]);
+  });
+
+  it('reads whether the latch is tripped and which resources exist', async () => {
+    const host = new FakeHost();
+    host.simulation = { retval: xdr.ScVal.scvBool(true) };
+    await expect(clientFor(host).breakerIsTripped('vault:main')).resolves.toBe(true);
+
+    host.simulation = {
+      retval: xdr.ScVal.scvVec(['vault:main', 'vault:ops'].map((name) => toScVal(stringArg(name)))),
+    };
+    await expect(clientFor(host).breakerResources()).resolves.toEqual(['vault:main', 'vault:ops']);
+    expect(invoked(host.simulated[1] as Transaction).functionName).toBe('resources');
+  });
+
+  it('returns an empty list when no resource is configured', async () => {
+    const host = new FakeHost();
+    host.simulation = { retval: xdr.ScVal.scvVec([]) };
+
+    await expect(clientFor(host).breakerResources()).resolves.toEqual([]);
   });
 });
 
@@ -293,7 +519,7 @@ describe('send', () => {
     const signatures = (host.submitted[0] as Transaction).signatures;
     expect(signatures).toHaveLength(1);
     const raw = HOLDER.rawPublicKey();
-    expect(Buffer.from(signatures[0]?.hint() as Uint8Array).toString('hex')).toBe(
+    expect(Buffer.from(signatures[0]?.hint.value ?? new Uint8Array()).toString('hex')).toBe(
       Buffer.from(raw.subarray(28)).toString('hex'),
     );
   });
@@ -305,9 +531,12 @@ describe('send', () => {
     await clientFor(host).send({ role: 'core', func: 'issue', args: [] });
 
     const entry = invoked(host.submitted[0] as Transaction).auth[0];
-    const credentials = entry?.credentials().address();
-    expect(credentials?.signatureExpirationLedger()).toBe(1_010);
-    expect(credentials?.signature().vec()).toHaveLength(1);
+    const credentials = entry?.credentials;
+    if (credentials?.type !== 'sorobanCredentialsAddress') {
+      throw new Error('expected address credentials');
+    }
+    expect(credentials.address.signatureExpirationLedger).toBe(1_010);
+    expect(asVec(credentials.address.signature, 'signature')).toHaveLength(1);
   });
 
   it('uses the configured authorisation window', async () => {
@@ -323,12 +552,11 @@ describe('send', () => {
 
     await client.send({ role: 'core', func: 'issue', args: [] });
 
-    expect(
-      invoked(host.submitted[0] as Transaction)
-        .auth[0]?.credentials()
-        .address()
-        ?.signatureExpirationLedger(),
-    ).toBe(1_003);
+    const credentials = invoked(host.submitted[0] as Transaction).auth[0]?.credentials;
+    if (credentials?.type !== 'sorobanCredentialsAddress') {
+      throw new Error('expected address credentials');
+    }
+    expect(credentials.address.signatureExpirationLedger).toBe(1_003);
   });
 
   it('leaves a source-account authorisation exactly as the node returned it', async () => {
@@ -426,7 +654,7 @@ describe('send', () => {
 
     const result = await clientFor(host).send({ role: 'core', func: 'issue', args: [] });
 
-    expect(result.returnValue?.u32()).toBe(7);
+    expect(asU32(result.returnValue as xdr.ScVal, 'returnValue')).toBe(7);
   });
 
   it('treats a committed failure as a race, not as a refusal', async () => {

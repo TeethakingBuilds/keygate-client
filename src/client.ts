@@ -31,16 +31,25 @@ import {
 
 import {
   asBool,
+  asI128,
   asOption,
   asU32,
+  decodeAddresses,
+  decodeBreakerConfig,
   decodeBreakerState,
   decodeGrant,
+  decodeProposal,
   decodeRule,
+  decodeStringVec,
+  decodeU64Vec,
   encodeArgs,
+  type BreakerConfigInfo,
   type BreakerStateInfo,
   type GrantInfo,
+  type ProposalInfo,
   type RuleInfo,
 } from './abi.js';
+import { breakerCalls, multisigCalls } from './calls.js';
 import {
   addressArg,
   effectFromDiscriminant,
@@ -65,11 +74,16 @@ import {
 import type { CommitOutcome, LedgerHost, SimulationOutcome } from './host.js';
 import { authorizationSigner, decoratedSignature, requireSigner, type Signer } from './signer.js';
 
-/** Where the four keygate contracts live. Only `multisig` is optional. */
+/** Where the keygate contracts live. `core` is required; the rest are optional. */
 export interface ContractAddresses {
   readonly core: Address;
-  readonly policy: Address;
-  readonly breaker: Address;
+  /**
+   * Only the contracts a caller actually uses need an address: `addressFor`
+   * throws a clear `ConfigurationError` for a missing one, so a core-only
+   * caller is not forced to invent addresses for the rest.
+   */
+  readonly policy?: Address;
+  readonly breaker?: Address;
   readonly multisig?: Address;
 }
 
@@ -203,6 +217,76 @@ export class KeygateClient {
     return asOption(value, 'breaker.state', decodeBreakerState);
   }
 
+  /**
+   * The configuration for one resource, or `null` when it was never
+   * configured. A missing configuration is an ordinary answer, not an error —
+   * compare `breakerRemaining`, which refuses an unconfigured resource.
+   */
+  async breakerConfig(resource: string): Promise<BreakerConfigInfo | null> {
+    const value = await this.evaluate(breakerCalls.config(resource));
+    return asOption(value, 'breaker.config', decodeBreakerConfig);
+  }
+
+  /**
+   * How much of the window is still available.
+   *
+   * This is the effective headroom, not the persisted state: the contract
+   * rolls the window forward the way `enforce` does without persisting it, so
+   * a window that has already expired reads as the full limit again, and a
+   * tripped resource reads as `0`. `breakerState` is the persisted state
+   * instead — the window start and the amount used as last recorded.
+   *
+   * An unconfigured resource is refused on-chain (`NotConfigured`), which
+   * surfaces as `SimulationRejectedError` rather than `null` or `0`.
+   */
+  async breakerRemaining(resource: string): Promise<bigint> {
+    return await this.read(breakerCalls.remaining(resource), asI128);
+  }
+
+  /** Whether the latch for one resource is currently tripped. */
+  async breakerIsTripped(resource: string): Promise<boolean> {
+    return await this.read(breakerCalls.isTripped(resource), asBool);
+  }
+
+  /** Every resource that has a configuration, in the order the contract lists them. */
+  async breakerResources(): Promise<string[]> {
+    return await this.read(breakerCalls.resources(), decodeStringVec);
+  }
+
+  /**
+   * One proposal, or `null` when the id is unknown. The contract returns an
+   * `Option<Proposal>`, so an absent proposal is an ordinary answer.
+   */
+  async proposal(id: number): Promise<ProposalInfo | null> {
+    const value = await this.evaluate(multisigCalls.proposal(id));
+    return asOption(value, 'multisig.proposal', decodeProposal);
+  }
+
+  /** The ids of proposals that are still live (neither executed nor cancelled). */
+  async pendingProposals(): Promise<number[]> {
+    return await this.read(multisigCalls.liveIds(), decodeU64Vec);
+  }
+
+  /** Who has approved one proposal so far, in the order they approved. */
+  async approvals(id: number): Promise<Address[]> {
+    return await this.read(multisigCalls.approvals(id), decodeAddresses);
+  }
+
+  /** The current owner set of the multisig. */
+  async owners(): Promise<Address[]> {
+    return await this.read(multisigCalls.owners(), decodeAddresses);
+  }
+
+  /** How many approvals a proposal needs before it can execute. */
+  async threshold(): Promise<number> {
+    return await this.read(multisigCalls.threshold(), asU32);
+  }
+
+  /** Whether an address is one of the multisig's current owners. */
+  async isOwner(address: Address): Promise<boolean> {
+    return await this.read(multisigCalls.isOwner(address), asBool);
+  }
+
   /** Builds, signs, submits and waits for one call. */
   async send(call: Call): Promise<SendResult> {
     const signer = requireSigner(this.signer);
@@ -301,19 +385,20 @@ export class KeygateClient {
     const expiration = latestLedger + this.authWindow;
     const signed: xdr.SorobanAuthorizationEntry[] = [];
     for (const entry of entries) {
-      const credentials = entry.credentials();
-      if (credentials.switch().name === 'sorobanCredentialsSourceAccount') {
+      const credentials = entry.credentials;
+      if (credentials.type === 'sorobanCredentialsSourceAccount') {
         // Source-account credentials are covered by the transaction signature.
         signed.push(entry);
         continue;
       }
-      const address = credentials.address();
-      if (address === undefined) {
+      if (credentials.type !== 'sorobanCredentialsAddress') {
+        // V2 and delegated credentials are a newer authorisation shape this
+        // client does not sign; say so rather than misreading the entry.
         throw new ConfigurationError(
-          `${call.role}.${call.func} returned an authorisation this client cannot read`,
+          `${call.role}.${call.func} returned an authorisation this client cannot sign (${credentials.type})`,
         );
       }
-      const holder = StellarAddress.fromScAddress(address.address()).toString();
+      const holder = StellarAddress.fromScAddress(credentials.address.address).toString();
       if (holder !== signer.publicKey) {
         throw new ConfigurationError(
           `${call.role}.${call.func} asks ${holder} to authorise, but this client signs for ${signer.publicKey}`,
