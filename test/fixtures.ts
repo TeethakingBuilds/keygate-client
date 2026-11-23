@@ -58,7 +58,7 @@ export function addressAuth(
     credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
       new xdr.SorobanAddressCredentials({
         address: new Address(address).toScAddress(),
-        nonce: new xdr.Int64(1n),
+        nonce: xdr.Int64(1n),
         signatureExpirationLedger: 0,
         signature: xdr.ScVal.scvVec([]),
       }),

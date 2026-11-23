@@ -1,6 +1,7 @@
 import { Keypair, authorizeEntry, hash, xdr } from '@stellar/stellar-sdk';
 import { describe, expect, it } from 'vitest';
 
+import { asMap, asVec } from '../src/abi.js';
 import { ConfigurationError } from '../src/errors.js';
 import {
   authorizationSigner,
@@ -49,15 +50,16 @@ describe('authorizationSigner', () => {
       PASSPHRASE,
     );
 
-    const credentials = signed.credentials().address();
-    expect(credentials).toBeDefined();
-    expect(credentials?.signatureExpirationLedger()).toBe(10_099);
-    expect(credentials?.nonce()).toBeDefined();
+    const credentials = signed.credentials;
+    if (credentials.type !== 'sorobanCredentialsAddress') {
+      throw new Error('expected address credentials');
+    }
+    expect(credentials.address.signatureExpirationLedger).toBe(10_099);
+    expect(credentials.address.nonce).toBeDefined();
 
-    const sig = credentials?.signature().vec()?.[0];
-    expect(sig?.switch().name).toBe('scvMap');
-    const map = sig?.map();
-    const keys = map?.map((entryItem) => entryItem.key().sym().toString());
+    const sig = asVec(credentials.address.signature, 'signature')[0];
+    expect(sig?.type).toBe('scvMap');
+    const keys = sig === undefined ? [] : [...asMap(sig, 'signature').keys()];
     expect(keys).toEqual(['public_key', 'signature']);
   });
 
@@ -71,7 +73,7 @@ describe('authorizationSigner', () => {
     );
 
     expect(signed.toXDR('base64')).toBe(entry.toXDR('base64'));
-    expect(signed.credentials().switch().name).toBe('sorobanCredentialsSourceAccount');
+    expect(signed.credentials.type).toBe('sorobanCredentialsSourceAccount');
   });
 
   it('signs whatever key it is given, which is why the client checks first', async () => {
@@ -105,10 +107,10 @@ describe('decoratedSignature', () => {
     const decorated = decoratedSignature(holder.publicKey(), signature);
     const raw = Keypair.fromPublicKey(holder.publicKey()).rawPublicKey();
 
-    expect(Buffer.from(decorated.hint()).toString('hex')).toBe(
+    expect(Buffer.from(decorated.hint.value).toString('hex')).toBe(
       Buffer.from(raw.subarray(raw.length - 4)).toString('hex'),
     );
-    expect(Buffer.from(decorated.signature()).toString('hex')).toBe(
+    expect(Buffer.from(decorated.signature.value).toString('hex')).toBe(
       Buffer.from(signature).toString('hex'),
     );
   });
@@ -118,11 +120,11 @@ describe('decoratedSignature', () => {
     const bytes = decoratedSignature(holder.publicKey(), signature).toXDR('base64');
     const parsed = xdr.DecoratedSignature.fromXDR(bytes, 'base64');
 
-    expect(Buffer.from(parsed.signature()).toString('hex')).toBe(
+    expect(Buffer.from(parsed.signature.value).toString('hex')).toBe(
       Buffer.from(signature).toString('hex'),
     );
-    expect(Buffer.from(parsed.hint()).toString('hex')).toBe(
-      Buffer.from(decoratedSignature(holder.publicKey(), signature).hint()).toString('hex'),
+    expect(Buffer.from(parsed.hint.value).toString('hex')).toBe(
+      Buffer.from(decoratedSignature(holder.publicKey(), signature).hint.value).toString('hex'),
     );
   });
 });

@@ -18,7 +18,7 @@ const BASE = { id: '1', latestLedger: 1234, events: [], _parsed: true };
 const DATA = new SorobanDataBuilder().setResources(1000, 2000, 3000).build();
 const RETVAL = xdr.ScVal.scvBool(true);
 const AUTH = [addressAuth('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF')];
-const RESULT = xdr.TransactionResult.fromXDR(Buffer.alloc(20), 'raw');
+const RESULT = xdr.TransactionResult.fromXDR(Buffer.alloc(20));
 
 /**
  * The XDR fields `getTransaction` always carries. `mapCommit` reads none of
@@ -37,7 +37,7 @@ const COMMITTED = {
     .build()
     .toEnvelope(),
   resultXdr: RESULT,
-  resultMetaXdr: xdr.TransactionMeta.fromXDR(Buffer.alloc(8), 'raw'),
+  resultMetaXdr: xdr.TransactionMeta.fromXDR(Buffer.alloc(8)),
 };
 
 /** A transaction the node has already applied. */
@@ -53,6 +53,7 @@ function recorded(status: rpc.Api.GetTransactionStatus): rpc.Api.GetTransactionR
     createdAt: 1_800_000_000,
     applicationOrder: 1,
     feeBump: false,
+    events: { transactionEventsXdr: [], contractEventsXdr: [] },
     ...COMMITTED,
   };
 }

@@ -53,6 +53,13 @@ jobs:
         # integrator compiles against.
         run: pnpm build
 
+      - name: Packed-package consumer smoke test
+        # Issue #8: installs the packed tarball into isolated npm and pnpm
+        # consumers with lifecycle scripts enabled. Needs the registry, so it
+        # is gated behind KEYGATE_RUN_CONSUMER_SMOKE and runs separately from
+        # the offline unit suite.
+        run: pnpm test:consumer
+
       - name: Check the package surface
         run: |
           test -f dist/index.js
