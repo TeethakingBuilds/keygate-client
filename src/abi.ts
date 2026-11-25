@@ -16,6 +16,10 @@ import {
   type AbiArg,
   type Address as Strkey,
   type Effect,
+  type PaymentReceiptInfo,
+  type PaymentRemaining,
+  type PaymentUsage,
+  type SpendingPolicyInfo,
   type Timestamp,
   type Triple,
 } from './types.js';
@@ -46,6 +50,8 @@ export function toScVal(arg: AbiArg): xdr.ScVal {
       return nativeToScVal(arg.value, { type: 'i128' });
     case 'bool':
       return nativeToScVal(arg.value, { type: 'bool' });
+    case 'bytes':
+      return xdr.ScVal.scvBytes(arg.value);
     case 'vec':
       return xdr.ScVal.scvVec(arg.value.map(toScVal));
   }
@@ -138,6 +144,16 @@ export function asString(scval: xdr.ScVal, context: string): string {
 export function asSymbol(scval: xdr.ScVal, context: string): string {
   expect(tag(scval) === 'scvSymbol', `${context}: expected symbol, got ${tag(scval)}`);
   return String(raw(scval));
+}
+
+export function asBytes(scval: xdr.ScVal, context: string): Uint8Array {
+  expect(tag(scval) === 'scvBytes', `${context}: expected bytes, got ${tag(scval)}`);
+  // js-xdr v4 wraps the arm in an `ScBytes` object holding the raw bytes in
+  // `.value` — the arm is never the `Uint8Array` itself.
+  const value = raw(scval);
+  const bytes = value instanceof Uint8Array ? value : (value as { value?: unknown } | null)?.value;
+  expect(bytes instanceof Uint8Array, `${context}: expected bytes, received ${typeof value}`);
+  return bytes;
 }
 
 export function asAddress(scval: xdr.ScVal, context: string): Strkey {
@@ -265,6 +281,63 @@ export function decodeBreakerState(scval: xdr.ScVal, context = 'state'): Breaker
     windowStart: Number(asU64(field(fields, 'window_start', context), `${context}.window_start`)),
     used: asI128(field(fields, 'used', context), `${context}.used`),
     tripped: asBool(field(fields, 'tripped', context), `${context}.tripped`),
+  };
+}
+
+/** `Usage` in `keygate-payments`. */
+export function decodePaymentUsage(scval: xdr.ScVal, context = 'usage'): PaymentUsage {
+  const fields = asMap(scval, context);
+  return {
+    dayBucket: Number(asU64(field(fields, 'day_bucket', context), `${context}.day_bucket`)),
+    dayUsed: asI128(field(fields, 'day_used', context), `${context}.day_used`),
+    monthBucket: Number(asU64(field(fields, 'month_bucket', context), `${context}.month_bucket`)),
+    monthUsed: asI128(field(fields, 'month_used', context), `${context}.month_used`),
+  };
+}
+
+/** `PaymentReceipt` in `keygate-payments`. */
+export function decodePaymentReceipt(
+  scval: xdr.ScVal,
+  context = 'payment_receipt',
+): PaymentReceiptInfo {
+  const fields = asMap(scval, context);
+  return {
+    reference: asBytes(field(fields, 'reference', context), `${context}.reference`),
+    from: asAddress(field(fields, 'from', context), `${context}.from`),
+    to: asAddress(field(fields, 'to', context), `${context}.to`),
+    amount: asI128(field(fields, 'amount', context), `${context}.amount`),
+    timestamp: Number(asU64(field(fields, 'timestamp', context), `${context}.timestamp`)),
+  };
+}
+
+/** `remaining` in `keygate-payments`: the `(daily, monthly)` tuple. */
+export function decodePaymentRemaining(scval: xdr.ScVal, context = 'remaining'): PaymentRemaining {
+  const values = asVec(scval, context);
+  expect(
+    values.length === 2,
+    `${context}: expected a (daily, monthly) pair, got ${values.length} values`,
+  );
+  return {
+    daily: asI128(values[0] as xdr.ScVal, `${context}[0]`),
+    monthly: asI128(values[1] as xdr.ScVal, `${context}[1]`),
+  };
+}
+
+/** `SpendingPolicy` in `keygate-payments`. */
+export function decodeSpendingPolicy(scval: xdr.ScVal, context = 'policy'): SpendingPolicyInfo {
+  const fields = asMap(scval, context);
+  return {
+    dailyLimit: asI128(field(fields, 'daily_limit', context), `${context}.daily_limit`),
+    monthlyLimit: asI128(field(fields, 'monthly_limit', context), `${context}.monthly_limit`),
+    approvalAbove: asI128(field(fields, 'approval_above', context), `${context}.approval_above`),
+    approvers: asVec(field(fields, 'approvers', context), `${context}.approvers`).map((value) =>
+      asAddress(value, `${context}.approvers[]`),
+    ),
+    approvalThreshold: asU32(
+      field(fields, 'approval_threshold', context),
+      `${context}.approval_threshold`,
+    ),
+    allowlistOnly: asBool(field(fields, 'allowlist_only', context), `${context}.allowlist_only`),
   };
 }
 

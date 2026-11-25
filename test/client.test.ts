@@ -19,12 +19,21 @@ import {
 } from '../src/errors.js';
 import type { CommitOutcome, LedgerHost, SimulationOutcome, SubmitOutcome } from '../src/host.js';
 import { keypairSigner } from '../src/signer.js';
-import { addressArg, boolArg, i128Arg, stringArg, symbolArg, u64Arg } from '../src/types.js';
+import {
+  addressArg,
+  boolArg,
+  bytesArg,
+  i128Arg,
+  stringArg,
+  symbolArg,
+  u64Arg,
+} from '../src/types.js';
 import {
   BREAKER,
   CORE,
   MULTISIG,
   PASSPHRASE,
+  PAYMENTS,
   POLICY,
   addressAuth,
   sourceAccountAuth,
@@ -37,6 +46,7 @@ const CONTRACT_ADDRESSES: ContractAddresses = {
   policy: POLICY,
   breaker: BREAKER,
   multisig: MULTISIG,
+  payments: PAYMENTS,
 };
 const FOOTPRINT = new SorobanDataBuilder().setResources(1000, 2000, 3000).build();
 const TX_HASH = 'a'.repeat(64);
@@ -920,5 +930,185 @@ describe('the client and its own decoders', () => {
     await expect(
       clientFor(host).read({ role: 'core', func: 'paused', args: [] }, asBool),
     ).rejects.toThrow(/core\.paused: expected bool, got scvU32/);
+  });
+});
+
+describe('payPolicy', () => {
+  const reference = new Uint8Array(32).fill(11);
+  const deadline = 1_800_000_000;
+
+  /** Builds a struct the way the payments contract returns it. */
+  function scMap(entries: [string, xdr.ScVal][]): xdr.ScVal {
+    return xdr.ScVal.scvMap(
+      entries.map(([key, val]) => new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol(key), val })),
+    );
+  }
+
+  function receiptMap(): xdr.ScVal {
+    return scMap([
+      ['reference', toScVal(bytesArg(reference))],
+      ['from', toScVal(addressArg(HOLDER.publicKey()))],
+      ['to', toScVal(addressArg(OTHER.publicKey()))],
+      ['amount', toScVal(i128Arg(10_000_000n))],
+      ['timestamp', toScVal(u64Arg(1_795_630_238n))],
+    ]);
+  }
+
+  it('submits a pay invocation to the payments contract', async () => {
+    const host = new FakeHost();
+    host.simulation = { retval: receiptMap() };
+
+    const result = await clientFor(host).payPolicy({
+      from: HOLDER.publicKey(),
+      to: OTHER.publicKey(),
+      amount: 10_000_000n,
+      reference,
+      deadline,
+    });
+
+    expect(result.hash).toBe(TX_HASH);
+    expect(result.ledger).toBe(4_999);
+    const call = invoked(host.submitted[0] as Transaction);
+    expect(call.functionName).toBe('pay');
+    expect(call.contract).toBe(new Address(PAYMENTS).toScAddress().toXDR('hex'));
+    expect(call.args[0]?.type).toBe('scvAddress');
+    expect(scValToNative(call.args[0] as xdr.ScVal)).toBe(HOLDER.publicKey());
+    expect(scValToNative(call.args[1] as xdr.ScVal)).toBe(OTHER.publicKey());
+    expect(scValToNative(call.args[2] as xdr.ScVal)).toBe(10_000_000n);
+    expect(call.args[3]?.type).toBe('scvBytes');
+    expect(scValToNative(call.args[3] as xdr.ScVal)).toEqual(reference);
+    expect(scValToNative(call.args[4] as xdr.ScVal)).toBe(BigInt(deadline));
+    expect(call.args[5]?.type).toBe('scvVec');
+    expect(scValToNative(call.args[5] as xdr.ScVal)).toEqual([]);
+  });
+
+  it('generates a fresh 32-byte reference and an hour-out deadline by default', async () => {
+    const host = new FakeHost();
+    const before = Math.floor(Date.now() / 1000);
+
+    await clientFor(host).payPolicy({
+      from: HOLDER.publicKey(),
+      to: OTHER.publicKey(),
+      amount: 1_000_000n,
+    });
+
+    const call = invoked(host.submitted[0] as Transaction);
+    const generated = scValToNative(call.args[3] as xdr.ScVal) as Uint8Array;
+    expect(generated).toBeInstanceOf(Uint8Array);
+    expect(generated.length).toBe(32);
+    expect(generated).not.toEqual(reference);
+    const generatedDeadline = scValToNative(call.args[4] as xdr.ScVal) as bigint;
+    expect(generatedDeadline).toBeGreaterThanOrEqual(BigInt(before + 3_600));
+    expect(generatedDeadline).toBeLessThanOrEqual(BigInt(Math.floor(Date.now() / 1000) + 3_600));
+  });
+
+  it('refuses a payment that cannot be valid before it reaches the node', async () => {
+    const host = new FakeHost();
+    await expect(
+      clientFor(host).payPolicy({ from: HOLDER.publicKey(), to: OTHER.publicKey(), amount: 0n }),
+    ).rejects.toBeInstanceOf(ConfigurationError);
+    await expect(
+      clientFor(host).payPolicy({
+        from: HOLDER.publicKey(),
+        to: HOLDER.publicKey(),
+        amount: 1n,
+      }),
+    ).rejects.toThrow(/sender and recipient must be different/);
+    expect(host.submitted).toEqual([]);
+  });
+
+  it('says so when no payments contract is configured', async () => {
+    const host = new FakeHost();
+    const coreOnly = new KeygateClient({
+      host,
+      contracts: { core: CORE },
+      networkPassphrase: PASSPHRASE,
+      signer: keypairSigner(HOLDER),
+      pollIntervalMs: 0,
+    });
+    await expect(
+      coreOnly.payPolicy({ from: HOLDER.publicKey(), to: OTHER.publicKey(), amount: 1n }),
+    ).rejects.toThrow(/no payments contract configured/);
+  });
+
+  it('turns a policy refusal into the named contract error', async () => {
+    const host = new FakeHost();
+    host.simulation = {
+      error: 'HostError: Error(Contract, #8)',
+      retval: undefined,
+      sorobanData: undefined,
+    };
+
+    const error = await clientFor(host)
+      .payPolicy({ from: HOLDER.publicKey(), to: OTHER.publicKey(), amount: 10_000_000n })
+      .catch((thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(SimulationRejectedError);
+    expect((error as SimulationRejectedError).code).toBe(8);
+    expect((error as SimulationRejectedError).role).toBe('payments');
+    expect((error as SimulationRejectedError).func).toBe('pay');
+    expect((error as Error).message).toContain('DailyLimitExceeded');
+    expect(host.submitted).toEqual([]);
+  });
+
+  it('reads usage, receipt, remaining, allowlist and policy back', async () => {
+    const host = new FakeHost();
+    host.simulation = {
+      retval: scMap([
+        ['day_bucket', toScVal(u64Arg(12n))],
+        ['day_used', toScVal(i128Arg(10_000_000n))],
+        ['month_bucket', toScVal(u64Arg(2n))],
+        ['month_used', toScVal(i128Arg(20_000_000n))],
+      ]),
+    };
+    await expect(clientFor(host).paymentUsage(HOLDER.publicKey())).resolves.toEqual({
+      dayBucket: 12,
+      dayUsed: 10_000_000n,
+      monthBucket: 2,
+      monthUsed: 20_000_000n,
+    });
+
+    host.simulation = { retval: receiptMap() };
+    await expect(clientFor(host).paymentReceipt(HOLDER.publicKey(), reference)).resolves.toEqual({
+      reference,
+      from: HOLDER.publicKey(),
+      to: OTHER.publicKey(),
+      amount: 10_000_000n,
+      timestamp: 1_795_630_238,
+    });
+    host.simulation = { retval: xdr.ScVal.scvLedgerKeyContractInstance() };
+    await expect(clientFor(host).paymentReceipt(HOLDER.publicKey(), reference)).resolves.toBeNull();
+
+    host.simulation = {
+      retval: xdr.ScVal.scvVec([toScVal(i128Arg(90_000_000n)), toScVal(i128Arg(980_000_000n))]),
+    };
+    await expect(clientFor(host).paymentRemaining(HOLDER.publicKey())).resolves.toEqual({
+      daily: 90_000_000n,
+      monthly: 980_000_000n,
+    });
+
+    host.simulation = { retval: xdr.ScVal.scvBool(true) };
+    await expect(
+      clientFor(host).paymentIsAllowed(HOLDER.publicKey(), OTHER.publicKey()),
+    ).resolves.toBe(true);
+
+    host.simulation = {
+      retval: scMap([
+        ['daily_limit', toScVal(i128Arg(100_000_000n))],
+        ['monthly_limit', toScVal(i128Arg(1_000_000_000n))],
+        ['approval_above', toScVal(i128Arg(100_000_000n))],
+        ['approvers', xdr.ScVal.scvVec([toScVal(addressArg(HOLDER.publicKey()))])],
+        ['approval_threshold', toScVal({ kind: 'u32', value: 0 })],
+        ['allowlist_only', toScVal(boolArg(false))],
+      ]),
+    };
+    await expect(clientFor(host).paymentPolicy(HOLDER.publicKey())).resolves.toEqual({
+      dailyLimit: 100_000_000n,
+      monthlyLimit: 1_000_000_000n,
+      approvalAbove: 100_000_000n,
+      approvers: [HOLDER.publicKey()],
+      approvalThreshold: 0,
+      allowlistOnly: false,
+    });
   });
 });

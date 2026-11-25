@@ -18,6 +18,7 @@ export const CORE = contract(1);
 export const POLICY = contract(2);
 export const BREAKER = contract(3);
 export const MULTISIG = contract(4);
+export const PAYMENTS = contract(5);
 
 /** `G…` address of a fresh, unrelated account. */
 export function accountAddress(seed: number): string {
