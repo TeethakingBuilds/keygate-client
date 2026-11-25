@@ -9,6 +9,7 @@
  */
 import {
   addressArg,
+  bytesArg,
   effectArg,
   i128Arg,
   stringArg,
@@ -38,6 +39,10 @@ function breaker(func: string, args: readonly AbiArg[] = []): Call {
 
 function multisig(func: string, args: readonly AbiArg[] = []): Call {
   return { role: 'multisig', func, args };
+}
+
+function payments(func: string, args: readonly AbiArg[] = []): Call {
+  return { role: 'payments', func, args };
 }
 
 /** `keygate-core`: the capability registry. */
@@ -175,6 +180,62 @@ export const multisigCalls = {
   owners: (): Call => multisig('owners'),
   threshold: (): Call => multisig('threshold'),
   isOwner: (address: Address): Call => multisig('is_owner', [addressArg(address)]),
+};
+
+/** `keygate-payments`: policy-routed USDC transfers. */
+export const paymentsCalls = {
+  /**
+   * Builds the `pay` invocation: the transfer and the policy check happen in
+   * the same call, so a refusal is atomic — no value moves.
+   *
+   * `reference` must be exactly 32 bytes and unique per payer: the contract
+   * stores the receipt under it and refuses a repeat (`DuplicateReference`).
+   * `deadline` is unix seconds; the contract allows at most 7 days out.
+   * `approvals` lists co-signers and is only accepted when the amount is above
+   * the policy's approval threshold — and every listed approver must authorise
+   * the call (see `KeygateClient.payPolicy`).
+   */
+  pay: (
+    from: Address,
+    to: Address,
+    amount: bigint,
+    reference: Uint8Array,
+    deadline: number | bigint,
+    approvals: readonly Address[] = [],
+  ): Call => {
+    if (reference.length !== 32) {
+      throw new RangeError(`payment reference must be exactly 32 bytes, got ${reference.length}`);
+    }
+    return payments('pay', [
+      addressArg(from),
+      addressArg(to),
+      i128Arg(amount),
+      bytesArg(reference),
+      u64Arg(BigInt(deadline)),
+      vecArg(approvals.map(addressArg)),
+    ]);
+  },
+
+  /** What one account has spent in its current daily and monthly buckets. */
+  usage: (account: Address): Call => payments('usage', [addressArg(account)]),
+
+  /** The on-chain receipt for one payment, or `null` when it never landed. */
+  paymentReceipt: (account: Address, reference: Uint8Array): Call => {
+    if (reference.length !== 32) {
+      throw new RangeError(`payment reference must be exactly 32 bytes, got ${reference.length}`);
+    }
+    return payments('payment_receipt', [addressArg(account), bytesArg(reference)]);
+  },
+
+  /** How much one account can still spend: `(daily, monthly)` headroom. */
+  remaining: (account: Address): Call => payments('remaining', [addressArg(account)]),
+
+  /** Whether the policy lets `account` pay `recipient` (the allowlist check). */
+  isAllowed: (account: Address, recipient: Address): Call =>
+    payments('is_allowed', [addressArg(account), addressArg(recipient)]),
+
+  /** The spending policy for one account, or `null` when none is set. */
+  policy: (account: Address): Call => payments('policy', [addressArg(account)]),
 };
 
 /** Escape hatch for a contract function this module does not wrap yet. */

@@ -52,7 +52,8 @@
     "typecheck": "tsc --noEmit",
     "check": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm test",
     "test:consumer": "KEYGATE_RUN_CONSUMER_SMOKE=1 vitest run test/consumer-smoke.test.ts",
-    "example:testnet": "tsx examples/issue-and-check.ts"
+    "example:testnet": "tsx examples/issue-and-check.ts",
+    "example:policy-send": "tsx examples/policy-routed-send.ts"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^17.4.0"

@@ -2,7 +2,14 @@ import { Keypair } from '@stellar/stellar-sdk';
 import { describe, expect, it } from 'vitest';
 
 import { toScVal } from '../src/abi.js';
-import { breakerCalls, coreCalls, multisigCalls, policyCalls, rawCall } from '../src/calls.js';
+import {
+  breakerCalls,
+  coreCalls,
+  multisigCalls,
+  paymentsCalls,
+  policyCalls,
+  rawCall,
+} from '../src/calls.js';
 import { u32Arg, type AbiArg } from '../src/types.js';
 
 const ACCOUNT = Keypair.random().publicKey();
@@ -154,5 +161,59 @@ describe('rawCall', () => {
       func: 'upgrade',
       args: [{ kind: 'u32', value: 2 }],
     });
+  });
+});
+
+describe('paymentsCalls', () => {
+  const reference = new Uint8Array(32).fill(9);
+
+  it('builds pay in the order the contract reads it', () => {
+    const call = paymentsCalls.pay(ACCOUNT, OTHER, 10_000_000n, reference, 1_800_000_000);
+    expect(call.role).toBe('payments');
+    expect(call.func).toBe('pay');
+    expect(kinds(call.args)).toEqual(['address', 'address', 'i128', 'bytes', 'u64', 'vec']);
+    expect(call.args).toEqual([
+      { kind: 'address', value: ACCOUNT },
+      { kind: 'address', value: OTHER },
+      { kind: 'i128', value: 10_000_000n },
+      { kind: 'bytes', value: reference },
+      { kind: 'u64', value: 1_800_000_000n },
+      { kind: 'vec', value: [] },
+    ]);
+  });
+
+  it('carries co-signers in the approvals vec', () => {
+    const call = paymentsCalls.pay(ACCOUNT, OTHER, 10_000_000n, reference, 1_800_000_000, [
+      ACCOUNT,
+      OTHER,
+    ]);
+    expect(call.args[5]).toEqual({
+      kind: 'vec',
+      value: [
+        { kind: 'address', value: ACCOUNT },
+        { kind: 'address', value: OTHER },
+      ],
+    });
+  });
+
+  it('refuses a reference that is not exactly 32 bytes', () => {
+    expect(() => paymentsCalls.pay(ACCOUNT, OTHER, 1n, new Uint8Array(31), 1_800_000_000)).toThrow(
+      /exactly 32 bytes/,
+    );
+    expect(() => paymentsCalls.paymentReceipt(ACCOUNT, new Uint8Array(33))).toThrow(
+      /exactly 32 bytes/,
+    );
+  });
+
+  it('names the payment read entry points', () => {
+    expect(paymentsCalls.usage(ACCOUNT)).toEqual({
+      role: 'payments',
+      func: 'usage',
+      args: [{ kind: 'address', value: ACCOUNT }],
+    });
+    expect(paymentsCalls.paymentReceipt(ACCOUNT, reference).func).toBe('payment_receipt');
+    expect(paymentsCalls.remaining(ACCOUNT).func).toBe('remaining');
+    expect(paymentsCalls.isAllowed(ACCOUNT, OTHER).func).toBe('is_allowed');
+    expect(paymentsCalls.policy(ACCOUNT).func).toBe('policy');
   });
 });

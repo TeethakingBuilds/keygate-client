@@ -51,6 +51,29 @@ describe('the error tables', () => {
       10: 'UnknownSelfCall',
       11: 'MalformedSelfCall',
     });
+    expect(CONTRACT_ERRORS.payments).toEqual({
+      1: 'Paused',
+      2: 'InvalidAmount',
+      3: 'InvalidPolicy',
+      4: 'NoPolicy',
+      5: 'RecipientNotAllowed',
+      6: 'BridgeRouteNotAllowed',
+      7: 'UnsupportedBridgeDomain',
+      8: 'DailyLimitExceeded',
+      9: 'MonthlyLimitExceeded',
+      10: 'DuplicateReference',
+      11: 'SelfPayment',
+      12: 'ApprovalUnavailable',
+      13: 'DuplicateApprover',
+      14: 'NotAnApprover',
+      15: 'InvalidToken',
+      16: 'InvalidCctp',
+      17: 'InvalidDeadline',
+      18: 'InvalidBridgeAmount',
+      19: 'InvalidDestination',
+      20: 'FastTransferUnsupported',
+      21: 'NoPendingAdmin',
+    });
   });
 
   it('are the reason a code needs a role: the same number says different things', () => {

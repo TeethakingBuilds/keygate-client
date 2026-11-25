@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   asBool,
+  asBytes,
   asMap,
   asOption,
   asString,
@@ -13,8 +14,12 @@ import {
   decodeBreakerConfig,
   decodeBreakerState,
   decodeGrant,
+  decodePaymentReceipt,
+  decodePaymentRemaining,
+  decodePaymentUsage,
   decodeProposal,
   decodeRule,
+  decodeSpendingPolicy,
   decodeStringVec,
   decodeTriples,
   decodeU64Vec,
@@ -25,6 +30,7 @@ import {
 import {
   addressArg,
   boolArg,
+  bytesArg,
   i128Arg,
   stringArg,
   symbolArg,
@@ -71,6 +77,7 @@ describe('toScVal', () => {
     expect(toScVal(u32Arg(1)).type).toBe('scvU32');
     expect(toScVal(u64Arg(1_000n)).type).toBe('scvU64');
     expect(toScVal(i128Arg(1_000n)).type).toBe('scvI128');
+    expect(toScVal(bytesArg(new Uint8Array([1, 2, 3]))).type).toBe('scvBytes');
     expect(toScVal(vecArg([stringArg('a')])).type).toBe('scvVec');
   });
 
@@ -380,5 +387,81 @@ describe('contractErrorCode', () => {
         xdr.ScVal.scvError(xdr.ScError.sceWasmVm(xdr.ScErrorCode.scecInternalError)),
       ),
     ).toBeUndefined();
+  });
+});
+
+describe('payments decoding', () => {
+  const reference = new Uint8Array(32).fill(7);
+
+  it('lifts bytes to scvBytes and reads them back', () => {
+    const value = toScVal(bytesArg(reference));
+    expect(value.type).toBe('scvBytes');
+    expect(asBytes(overTheWire(value), 'bytes')).toEqual(reference);
+    expect(() => asBytes(toScVal(stringArg('x')), 'bytes')).toThrow(/expected bytes/);
+  });
+
+  it('decodes a Usage struct field by field', () => {
+    const usage = mapOf(
+      entry('day_bucket', u(12n)),
+      entry('day_used', big(10_000_000n)),
+      entry('month_bucket', u(2n)),
+      entry('month_used', big(20_000_000n)),
+    );
+    expect(decodePaymentUsage(overTheWire(usage))).toEqual({
+      dayBucket: 12,
+      dayUsed: 10_000_000n,
+      monthBucket: 2,
+      monthUsed: 20_000_000n,
+    });
+    expect(() => decodePaymentUsage(mapOf(entry('day_bucket', u(12n))))).toThrow(
+      /missing field 'day_used'/,
+    );
+  });
+
+  it('decodes a PaymentReceipt struct field by field', () => {
+    const receipt = mapOf(
+      entry('reference', toScVal(bytesArg(reference))),
+      entry('from', addr(ACCOUNT)),
+      entry('to', addr(CONTRACT)),
+      entry('amount', big(10_000_000n)),
+      entry('timestamp', u(1_795_630_238n)),
+    );
+    expect(decodePaymentReceipt(overTheWire(receipt))).toEqual({
+      reference,
+      from: ACCOUNT,
+      to: CONTRACT,
+      amount: 10_000_000n,
+      timestamp: 1_795_630_238,
+    });
+  });
+
+  it('decodes a remaining pair as (daily, monthly)', () => {
+    const remaining = vec(big(90_000_000n), big(980_000_000n));
+    expect(decodePaymentRemaining(overTheWire(remaining))).toEqual({
+      daily: 90_000_000n,
+      monthly: 980_000_000n,
+    });
+    expect(() => decodePaymentRemaining(vec(big(1n)))).toThrow(
+      /expected a \(daily, monthly\) pair/,
+    );
+  });
+
+  it('decodes a SpendingPolicy struct field by field', () => {
+    const policy = mapOf(
+      entry('daily_limit', big(100_000_000n)),
+      entry('monthly_limit', big(1_000_000_000n)),
+      entry('approval_above', big(100_000_000n)),
+      entry('approvers', vec(addr(ACCOUNT))),
+      entry('approval_threshold', sml(0)),
+      entry('allowlist_only', flag(false)),
+    );
+    expect(decodeSpendingPolicy(overTheWire(policy))).toEqual({
+      dailyLimit: 100_000_000n,
+      monthlyLimit: 1_000_000_000n,
+      approvalAbove: 100_000_000n,
+      approvers: [ACCOUNT],
+      approvalThreshold: 0,
+      allowlistOnly: false,
+    });
   });
 });

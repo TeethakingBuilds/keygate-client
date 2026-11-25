@@ -28,8 +28,9 @@ git clone https://github.com/TeethakingBuilds/keygate-client
 cd keygate-client && corepack pnpm install && corepack pnpm build   # → dist/
 ```
 
-Requires Node 20+ and `@stellar/stellar-sdk` ^13, which this package declares as
-a dependency. The decision verification in `decision.ts` uses WebCrypto, so it
+Requires Node 20+ and `@stellar/stellar-sdk` ^17, which this package declares as
+a dependency. (Testnet is on protocol 30, and SDK 13 cannot parse its
+responses.) The decision verification in `decision.ts` uses WebCrypto, so it
 also runs in a browser; `signer.ts` touches `Buffer` in one place because js-xdr
 types a signature field that way, and a bundler has to provide it.
 
@@ -45,6 +46,7 @@ const client = new KeygateClient({
     policy: 'C…',
     breaker: 'C…',
     multisig: 'C…', // optional: only needed for the proposal builders
+    payments: 'C…', // optional: only needed for policy-routed send
   },
   networkPassphrase: 'Test SDF Network ; September 2015',
   signer: keypairSigner(admin),
@@ -89,6 +91,48 @@ breach returns normally so the contract's latch can persist; it is not a
 its committed return value. Decoding `'charged'` therefore is **not proof of a
 committed charge**, nor is it a budget reservation for a later transfer. Couple
 enforcement and moving value atomically on-chain when that guarantee is needed.
+
+## Policy-routed send
+
+`payPolicy` sends USDC through `keygate-payments` with the payer's policy
+enforced on-chain in the same call as the transfer — allowlist, daily and
+monthly limits, quorum approvals above the threshold, and the intent deadline.
+It is the alternative to the direct SAC path, which moves USDC without any of
+those checks. Check first, then send:
+
+```ts
+const remaining = await client.paymentRemaining(payer);
+const allowed = await client.paymentIsAllowed(payer, recipient);
+if (!allowed || remaining.daily < 10_000_000n) {
+  throw new Error('policy does not allow this payment');
+}
+
+const sent = await client.payPolicy({
+  from: payer,
+  to: recipient,
+  amount: 10_000_000n, // 1 USDC, in stroops
+});
+console.log(`paid in ledger ${sent.ledger} (${sent.hash})`);
+```
+
+A payment the policy refuses never reaches the ledger: the simulation rejects
+it as `SimulationRejectedError` carrying the contract's code
+(`DailyLimitExceeded`, `RecipientNotAllowed`, `NoPolicy`, …), so the refusal
+shows up before the user signs anything. `reference` defaults to fresh random
+bytes and `deadline` to one hour out — pass both explicitly when the caller
+must look the payment up later. The receipt and the usage are reads:
+
+```ts
+const receipt = await client.paymentReceipt(payer, reference);
+const usage = await client.paymentUsage(payer);
+```
+
+One honest limit: `approvals` lists co-signers, and every listed approver must
+authorise the call — but this client signs only for its own signer, so an
+above-threshold payment needs the approvers' signatures attached through
+another path (a wallet that signs authorisations, or a future multi-signer
+helper). See [examples/policy-routed-send.ts](./examples/policy-routed-send.ts),
+which runs the whole flow against testnet, including the over-limit refusal.
 
 Every read is a simulation, so it also runs the contract's own checks —
 `SimulationRejectedError` means the call was refused, and nothing reached the
@@ -231,35 +275,44 @@ server's own signing code.
 
 ## What is in the package
 
-| Module        | Job                                                                                                                                                |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `types.ts`    | the vocabulary — `Triple`, `Call`, `AbiArg`, `Decision` — with no XDR and no SDK types in it                                                       |
-| `calls.ts`    | `coreCalls` / `policyCalls` / `breakerCalls` / `multisigCalls`: one pure builder per contract entry point, plus `rawCall` for anything not wrapped |
-| `abi.ts`      | `AbiArg` → `xdr.ScVal` and back; the only module that touches XDR                                                                                  |
-| `client.ts`   | `KeygateClient`: simulate → authorize → rebuild → submit → commit, plus typed reads (below)                                                        |
-| `host.ts`     | `LedgerHost`, the four-method network surface, and `sorobanRpcHost` / `connect`                                                                    |
-| `signer.ts`   | `Signer`, `keypairSigner`, `authorizationSigner`, decorated signatures                                                                             |
-| `errors.ts`   | the error classes and the contract's `#[contracterror]` codes, per role                                                                            |
-| `decision.ts` | canonical decision rendering, HMAC sign/verify, freshness                                                                                          |
+| Module        | Job                                                                                                                                                                  |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `types.ts`    | the vocabulary — `Triple`, `Call`, `AbiArg`, `Decision` — with no XDR and no SDK types in it                                                                         |
+| `calls.ts`    | `coreCalls` / `policyCalls` / `breakerCalls` / `multisigCalls` / `paymentsCalls`: one pure builder per contract entry point, plus `rawCall` for anything not wrapped |
+| `abi.ts`      | `AbiArg` → `xdr.ScVal` and back; the only module that touches XDR                                                                                                    |
+| `client.ts`   | `KeygateClient`: simulate → authorize → rebuild → submit → commit, plus typed reads (below)                                                                          |
+| `host.ts`     | `LedgerHost`, the four-method network surface, and `sorobanRpcHost` / `connect`                                                                                      |
+| `signer.ts`   | `Signer`, `keypairSigner`, `authorizationSigner`, decorated signatures                                                                                               |
+| `errors.ts`   | the error classes and the contract's `#[contracterror]` codes, per role                                                                                              |
+| `decision.ts` | canonical decision rendering, HMAC sign/verify, freshness                                                                                                            |
 
 Reads — all simulations, so they need no signer and cost nothing:
 
-| Method                                          | Reads                                                                   |
-| ----------------------------------------------- | ----------------------------------------------------------------------- |
-| `hasAccess(triple, holder)`                     | `core.check` — whether the holder may act now                           |
-| `grant(triple, holder)`                         | `core.grant` — the grant, or `null` when there is none                  |
-| `paused()`                                      | `core.paused`                                                           |
-| `rule(triple)`                                  | `policy.rule` — the rule, or `null` when there is none                  |
-| `defaultEffect()`                               | `policy.default_effect`                                                 |
-| `breakerState(resource)`                        | `breaker.state` — the persisted state: window start, amount used, latch |
-| `breakerConfig(resource)`                       | `breaker.config` — the limit and window, or `null` when unconfigured    |
-| `breakerRemaining(resource)`                    | `breaker.remaining` — the effective headroom in the current window      |
-| `breakerIsTripped(resource)`                    | `breaker.is_tripped`                                                    |
-| `breakerResources()`                            | `breaker.resources` — every configured resource                         |
-| `proposal(id)`                                  | `multisig.proposal` — the proposal, or `null` when the id is unknown    |
-| `pendingProposals()`                            | `multisig.live_ids`                                                     |
-| `approvals(id)`                                 | `multisig.approvals`                                                    |
-| `owners()` / `threshold()` / `isOwner(address)` | the multisig's owner set, quorum, and one membership check              |
+| Method                                          | Reads                                                                    |
+| ----------------------------------------------- | ------------------------------------------------------------------------ |
+| `hasAccess(triple, holder)`                     | `core.check` — whether the holder may act now                            |
+| `grant(triple, holder)`                         | `core.grant` — the grant, or `null` when there is none                   |
+| `paused()`                                      | `core.paused`                                                            |
+| `rule(triple)`                                  | `policy.rule` — the rule, or `null` when there is none                   |
+| `defaultEffect()`                               | `policy.default_effect`                                                  |
+| `breakerState(resource)`                        | `breaker.state` — the persisted state: window start, amount used, latch  |
+| `breakerConfig(resource)`                       | `breaker.config` — the limit and window, or `null` when unconfigured     |
+| `breakerRemaining(resource)`                    | `breaker.remaining` — the effective headroom in the current window       |
+| `breakerIsTripped(resource)`                    | `breaker.is_tripped`                                                     |
+| `breakerResources()`                            | `breaker.resources` — every configured resource                          |
+| `proposal(id)`                                  | `multisig.proposal` — the proposal, or `null` when the id is unknown     |
+| `pendingProposals()`                            | `multisig.live_ids`                                                      |
+| `approvals(id)`                                 | `multisig.approvals`                                                     |
+| `owners()` / `threshold()` / `isOwner(address)` | the multisig's owner set, quorum, and one membership check               |
+| `paymentUsage(account)`                         | `payments.usage` — what one account spent in its daily/monthly buckets   |
+| `paymentReceipt(account, reference)`            | `payments.payment_receipt` — the receipt, or `null` when it never landed |
+| `paymentRemaining(account)`                     | `payments.remaining` — the `(daily, monthly)` headroom left              |
+| `paymentIsAllowed(account, recipient)`          | `payments.is_allowed` — the allowlist check                              |
+| `paymentPolicy(account)`                        | `payments.policy` — the spending policy, or `null` when none is set      |
+
+`payPolicy` is the write behind those reads: it sends USDC through
+`keygate-payments` with the policy enforced on-chain (see
+[Policy-routed send](#policy-routed-send)).
 
 `breakerRemaining` and `breakerState` answer different questions: `remaining`
 rolls the window forward the way `enforce` does without persisting it, so a
@@ -329,7 +382,7 @@ corepack pnpm check         # all four
 corepack pnpm build         # dist/ (ESM + .d.ts)
 ```
 
-One hundred and twenty-four tests, none of which touch a network: the transaction
+One hundred and eighty-six tests, none of which touch a network: the transaction
 path runs against a `FakeHost` that records the submitted envelope and decodes it,
 so sequence reuse, fee composition, footprint attachment, auth signing and every
 failure branch are asserted on real XDR rather than mocks of it. Coverage
@@ -347,7 +400,7 @@ thresholds (80% lines and functions, 75% branches) are enforced by
 
 ## Status and scope
 
-Version 0.1.0, **unaudited**, and deliberately narrow: it drives the four keygate
+Version 0.1.0, **unaudited**, and deliberately narrow: it drives the five keygate
 contracts and verifies decisions. It does not do account funding, friendbot,
 time-bound transactions, fee bumping, multicall batching, or reading contracts
 other than keygate's — `rawCall` exists so you can reach a keygate function this
@@ -359,6 +412,7 @@ point it at, and [CONTRIBUTING.md](./CONTRIBUTING.md) before changing an encoder
 ## Documentation
 
 - [examples/README.md](./examples/README.md) — issue a capability on Stellar testnet, read it back, revoke it
+- [examples/policy-routed-send.ts](./examples/policy-routed-send.ts) — send 1 USDC through the policy contract on testnet, with the over-limit refusal first
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — setup, style, the cross-repo tables
 - [SECURITY.md](./SECURITY.md) — reporting and the trust boundaries of an SDK
 - [SUPPORT.md](./SUPPORT.md) — where to ask questions

@@ -16,7 +16,7 @@ export type Timestamp = number;
 export type Effect = 'allow' | 'deny';
 
 /** Which keygate contract a call targets. */
-export type ContractRole = 'core' | 'policy' | 'breaker' | 'multisig';
+export type ContractRole = 'core' | 'policy' | 'breaker' | 'multisig' | 'payments';
 
 export interface Triple {
   readonly resource: string;
@@ -39,6 +39,7 @@ export type AbiArg =
   | { readonly kind: 'u64'; readonly value: bigint }
   | { readonly kind: 'i128'; readonly value: bigint }
   | { readonly kind: 'bool'; readonly value: boolean }
+  | { readonly kind: 'bytes'; readonly value: Uint8Array }
   | { readonly kind: 'vec'; readonly value: readonly AbiArg[] };
 
 /** One contract entry point plus its arguments, ready to encode and send. */
@@ -143,6 +144,10 @@ export function boolArg(value: boolean): AbiArg {
   return { kind: 'bool', value };
 }
 
+export function bytesArg(value: Uint8Array): AbiArg {
+  return { kind: 'bytes', value };
+}
+
 export function vecArg(values: readonly AbiArg[]): AbiArg {
   return { kind: 'vec', value: values };
 }
@@ -153,4 +158,56 @@ export function tripleArgs(triple: Triple): readonly AbiArg[] {
 
 export function effectArg(effect: Effect): AbiArg {
   return u32Arg(EFFECT_DISCRIMINANT[effect]);
+}
+
+/** One policy-routed payment through `keygate-payments`. */
+export interface PolicyPayment {
+  readonly from: Address;
+  readonly to: Address;
+  /** Stroops (1e-7 USDC). Must be positive; the contract rejects the rest. */
+  readonly amount: bigint;
+  /** 32 bytes, unique per payer. Fresh random bytes when omitted. */
+  readonly reference?: Uint8Array | undefined;
+  /** Unix seconds. One hour out when omitted; the contract allows at most 7 days out. */
+  readonly deadline?: number | undefined;
+  /**
+   * Co-signers, only when the amount is above the policy's approval threshold.
+   * Each one must authorise the call; this client signs only for its own
+   * signer, so above-threshold payments need the approvers' signatures
+   * attached through another path.
+   */
+  readonly approvals?: readonly Address[] | undefined;
+}
+
+/** `Usage` in `keygate-payments`: what one account has spent in its buckets. */
+export interface PaymentUsage {
+  readonly dayBucket: number;
+  readonly dayUsed: bigint;
+  readonly monthBucket: number;
+  readonly monthUsed: bigint;
+}
+
+/** `PaymentReceipt` in `keygate-payments`: the on-chain proof a pay landed. */
+export interface PaymentReceiptInfo {
+  readonly reference: Uint8Array;
+  readonly from: Address;
+  readonly to: Address;
+  readonly amount: bigint;
+  readonly timestamp: Timestamp;
+}
+
+/** What one account can still spend: `(daily, monthly)` headroom. */
+export interface PaymentRemaining {
+  readonly daily: bigint;
+  readonly monthly: bigint;
+}
+
+/** `SpendingPolicy` in `keygate-payments`. */
+export interface SpendingPolicyInfo {
+  readonly dailyLimit: bigint;
+  readonly monthlyLimit: bigint;
+  readonly approvalAbove: bigint;
+  readonly approvers: readonly Address[];
+  readonly approvalThreshold: number;
+  readonly allowlistOnly: boolean;
 }

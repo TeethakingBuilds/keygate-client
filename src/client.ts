@@ -38,8 +38,12 @@ import {
   decodeBreakerConfig,
   decodeBreakerState,
   decodeGrant,
+  decodePaymentReceipt,
+  decodePaymentRemaining,
+  decodePaymentUsage,
   decodeProposal,
   decodeRule,
+  decodeSpendingPolicy,
   decodeStringVec,
   decodeU64Vec,
   encodeArgs,
@@ -49,7 +53,7 @@ import {
   type ProposalInfo,
   type RuleInfo,
 } from './abi.js';
-import { breakerCalls, multisigCalls } from './calls.js';
+import { breakerCalls, multisigCalls, paymentsCalls } from './calls.js';
 import {
   addressArg,
   effectFromDiscriminant,
@@ -59,6 +63,11 @@ import {
   type Call,
   type ContractRole,
   type Effect,
+  type PaymentReceiptInfo,
+  type PaymentRemaining,
+  type PaymentUsage,
+  type PolicyPayment,
+  type SpendingPolicyInfo,
   type Timestamp,
   type Triple,
 } from './types.js';
@@ -85,6 +94,7 @@ export interface ContractAddresses {
   readonly policy?: Address;
   readonly breaker?: Address;
   readonly multisig?: Address;
+  readonly payments?: Address;
 }
 
 export interface KeygateOptions {
@@ -122,6 +132,19 @@ export interface SendResult {
 
 /** The account a free simulation is charged to — which is to say, nobody. */
 const NULL_ACCOUNT = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF';
+
+/**
+ * A fresh 32-byte payment reference, unique per payer per payment.
+ *
+ * The contract stores the receipt under `(payer, reference)` and refuses a
+ * repeat, so a reused reference is a failed payment, not a double spend.
+ * Uses the platform CSPRNG, which exists in browsers and in Node.
+ */
+export function newPaymentReference(): Uint8Array {
+  const reference = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(reference);
+  return reference;
+}
 
 const DEFAULTS = {
   authLedgerWindow: 10,
@@ -285,6 +308,77 @@ export class KeygateClient {
   /** Whether an address is one of the multisig's current owners. */
   async isOwner(address: Address): Promise<boolean> {
     return await this.read(multisigCalls.isOwner(address), asBool);
+  }
+
+  /**
+   * Sends USDC through the payments contract with the payer's policy enforced
+   * on-chain in the same call as the transfer: allowlist, daily and monthly
+   * limits, quorum approvals above the threshold, and the intent deadline.
+   *
+   * A payment the policy refuses never reaches the ledger: the simulation
+   * rejects it as `SimulationRejectedError` carrying the contract's code
+   * (`DailyLimitExceeded`, `RecipientNotAllowed`, `NoPolicy`, …). When the UI
+   * needs the reason before the user signs, check first with
+   * `paymentRemaining` and `paymentIsAllowed`.
+   *
+   * `reference` defaults to fresh random bytes and `deadline` to one hour out.
+   * Pass both explicitly when the caller must look the payment up later by
+   * reference, or coordinate the deadline with an approver. `approvals` lists
+   * co-signers and is only accepted when the amount is above the policy's
+   * approval threshold; every listed approver must authorise the call, and this
+   * client signs only for its own signer — above-threshold payments need the
+   * approvers' signatures attached through another path (a wallet that signs
+   * authorisations, or a future multi-signer helper).
+   */
+  async payPolicy(payment: PolicyPayment): Promise<SendResult> {
+    if (payment.amount <= 0n) {
+      throw new ConfigurationError(`payment amount must be positive, got ${payment.amount}`);
+    }
+    if (payment.from === payment.to) {
+      throw new ConfigurationError('payment sender and recipient must be different accounts');
+    }
+    const reference = payment.reference ?? newPaymentReference();
+    const deadline = payment.deadline ?? Math.floor(Date.now() / 1000) + 3_600;
+    return await this.send(
+      paymentsCalls.pay(
+        payment.from,
+        payment.to,
+        payment.amount,
+        reference,
+        deadline,
+        payment.approvals ?? [],
+      ),
+    );
+  }
+
+  /** What one account has spent in its current daily and monthly buckets. */
+  async paymentUsage(account: Address): Promise<PaymentUsage> {
+    return await this.read(paymentsCalls.usage(account), decodePaymentUsage);
+  }
+
+  /** The on-chain receipt for one payment, or `null` when it never landed. */
+  async paymentReceipt(
+    account: Address,
+    reference: Uint8Array,
+  ): Promise<PaymentReceiptInfo | null> {
+    const value = await this.evaluate(paymentsCalls.paymentReceipt(account, reference));
+    return asOption(value, 'payments.payment_receipt', decodePaymentReceipt);
+  }
+
+  /** How much one account can still spend: `(daily, monthly)` headroom. */
+  async paymentRemaining(account: Address): Promise<PaymentRemaining> {
+    return await this.read(paymentsCalls.remaining(account), decodePaymentRemaining);
+  }
+
+  /** Whether the policy lets `account` pay `recipient` (the allowlist check). */
+  async paymentIsAllowed(account: Address, recipient: Address): Promise<boolean> {
+    return await this.read(paymentsCalls.isAllowed(account, recipient), asBool);
+  }
+
+  /** The spending policy for one account, or `null` when none is set. */
+  async paymentPolicy(account: Address): Promise<SpendingPolicyInfo | null> {
+    const value = await this.evaluate(paymentsCalls.policy(account));
+    return asOption(value, 'payments.policy', decodeSpendingPolicy);
   }
 
   /** Builds, signs, submits and waits for one call. */
